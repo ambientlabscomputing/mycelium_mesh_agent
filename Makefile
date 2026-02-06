@@ -14,6 +14,13 @@ run:
 build:
 	go build -o bin/mycelium-mesh-agent ./cmd/serve/main.go
 
+## install: Install the mycelium mesh agent binary to /usr/local/bin/
+.PHONY: install
+install: build
+	@echo "Installing mycelium-mesh-agent to /usr/local/bin/..."
+	@cp bin/mycelium-mesh-agent /usr/local/bin/mycelium-mesh-agent
+	@echo "✓ Installed to /usr/local/bin/"
+
 ## clean: Clean up build artifacts
 .PHONY: clean
 clean:
