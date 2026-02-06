@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/binding_engine"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
 )
 
@@ -40,16 +41,18 @@ type Adapter interface {
 
 // DeviceProvider implements the Adapter interface for device management.
 type DeviceProvider struct {
-	mu       sync.RWMutex
-	log      *slog.Logger
-	services map[string]*types.ServiceEntry // serviceID -> ServiceEntry
+	mu            sync.RWMutex
+	log           *slog.Logger
+	services      map[string]*types.ServiceEntry // serviceID -> ServiceEntry
+	bindingEngine binding_engine.BindingEngine
 }
 
 // NewDeviceProvider creates a new device provider adapter.
-func NewDeviceProvider(log *slog.Logger) *DeviceProvider {
+func NewDeviceProvider(log *slog.Logger, bindingEngine binding_engine.BindingEngine) *DeviceProvider {
 	return &DeviceProvider{
-		log:      log,
-		services: make(map[string]*types.ServiceEntry),
+		log:           log,
+		services:      make(map[string]*types.ServiceEntry),
+		bindingEngine: bindingEngine,
 	}
 }
 
@@ -182,22 +185,26 @@ func (dp *DeviceProvider) HandleRequest(ctx context.Context, serviceID string, r
 		return nil, types.ErrCapabilityNotFound
 	}
 
-	// Return a stub response
-	resp := &types.BindingResponse{
-		Decision:   types.BindingAllow,
-		ReasonCode: "",
+	// Delegate to binding engine for full policy evaluation
+	if dp.bindingEngine != nil {
+		resp := dp.bindingEngine.RequestBinding(ctx, req)
+		dp.log.Info("Host adapter binding request evaluated",
+			"service_id", serviceID,
+			"capability_id", req.Capability.ID,
+			"decision", resp.Decision,
+			"reason", resp.ReasonCode)
+		return resp, nil
+	}
+
+	// Fallback: deny if no binding engine configured
+	dp.log.Warn("No binding engine configured - denying request by default",
+		"service_id", serviceID,
+		"capability_id", req.Capability.ID)
+	return &types.BindingResponse{
+		Decision:   types.BindingDeny,
+		ReasonCode: types.ReasonInternalError,
 		BindingID:  req.RequestID,
-		Provider: &types.ProviderInfo{
-			ServiceID: service.ServiceID,
-			Identity:  service.ServiceIdentity,
-		},
-	}
-
-	if len(service.Endpoints) > 0 {
-		resp.Provider.Endpoint = service.Endpoints[0]
-	}
-
-	return resp, nil
+	}, nil
 }
 
 // Manager manages multiple device adapters.

@@ -9,6 +9,7 @@ import (
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/binding_engine"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/config"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/discovery"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/telemetry"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
 	"github.com/gin-gonic/gin"
@@ -16,13 +17,14 @@ import (
 
 // Server is the HTTP API server.
 type Server struct {
-	router        *gin.Engine
-	log           *slog.Logger
-	bindingEngine binding_engine.BindingEngine
-	registry      *discovery.Registry
-	flusher       *telemetry.Flusher
-	configStore   *config.Store
-	httpServer    *http.Server
+	router          *gin.Engine
+	log             *slog.Logger
+	bindingEngine   binding_engine.BindingEngine
+	registry        *discovery.Registry
+	flusher         *telemetry.Flusher
+	policyEvaluator policy_evaluator.PolicyEvaluator
+	configStore     *config.Store
+	httpServer      *http.Server
 }
 
 // NewServer creates a new HTTP API server.
@@ -31,18 +33,20 @@ func NewServer(
 	bindingEngine binding_engine.BindingEngine,
 	registry *discovery.Registry,
 	flusher *telemetry.Flusher,
+	policyEvaluator policy_evaluator.PolicyEvaluator,
 	configStore *config.Store,
 	port int,
 ) *Server {
 	router := gin.Default()
 
 	s := &Server{
-		router:        router,
-		log:           log,
-		bindingEngine: bindingEngine,
-		registry:      registry,
-		flusher:       flusher,
-		configStore:   configStore,
+		router:          router,
+		log:             log,
+		bindingEngine:   bindingEngine,
+		registry:        registry,
+		flusher:         flusher,
+		policyEvaluator: policyEvaluator,
+		configStore:     configStore,
 	}
 
 	// Setup routes
@@ -204,32 +208,125 @@ func (s *Server) handleIntrospectService(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, service)
+	// Build provides[] - validated capabilities this service provides
+	provides := make([]gin.H, 0, len(service.CapabilitiesProvided))
+	for _, capRef := range service.CapabilitiesProvided {
+		entry := gin.H{
+			"capability_id": capRef.CapabilityID,
+			"version":       capRef.Version,
+		}
+		cap := s.registry.GetCapability(capRef.CapabilityID)
+		if cap != nil {
+			entry["risk_class"] = cap.RiskClass
+			entry["description"] = cap.Description
+		}
+		provides = append(provides, entry)
+	}
+
+	// Build consumes[] - active bindings where this service is the client
+	consumes := make([]gin.H, 0)
+	activeBindings := s.bindingEngine.ListActiveBindings(c.Request.Context())
+	for _, b := range activeBindings {
+		if b.ClientServiceID == req.ServiceID {
+			consumes = append(consumes, gin.H{
+				"binding_id":    b.BindingID,
+				"capability_id": b.CapabilityID,
+				"provider_id":   b.ProviderServiceID,
+				"state":         b.State,
+				"expires_at":    b.ExpiresAt,
+			})
+		}
+	}
+
+	resp := gin.H{
+		"service":  service,
+		"provides": provides,
+		"consumes": consumes,
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleIntrospectMesh handles GET /api/v1/introspect/mesh.
 func (s *Server) handleIntrospectMesh(c *gin.Context) {
 	members := s.registry.ListMembers()
 	services := s.registry.ListServices()
-	capabilities := s.registry.ListCapabilities()
+
+	// Compute mesh state
+	meshState := s.computeMeshState(c.Request.Context(), members)
+
+	// Get policy version
+	policyVersion := ""
+	if s.policyEvaluator != nil {
+		policy := s.policyEvaluator.GetPolicy(c.Request.Context())
+		if policy != nil {
+			policyVersion = policy.Version
+		}
+	}
+
+	// Get capability cache version
+	capCacheVersion := ""
+	cache := s.registry.GetCapabilityCache()
+	if cache != nil {
+		capCacheVersion = cache.Version
+	}
+
+	// Get data plane mode from config
+	cfg := s.configStore.Get()
 
 	resp := gin.H{
-		"members":          members,
-		"services":         services,
-		"capabilities":     capabilities,
-		"member_count":     len(members),
-		"service_count":    len(services),
-		"capability_count": len(capabilities),
+		"mesh_state":               meshState,
+		"known_members":            len(members),
+		"known_services":           len(services),
+		"capability_cache_version": capCacheVersion,
+		"policy_version":           policyVersion,
+		"data_plane": gin.H{
+			"mode":   cfg.MeshMode,
+			"status": string(meshState),
+		},
+		"buffers": gin.H{
+			"telemetry_bytes":    s.flusher.BufferSizeBytes(),
+			"audit_events_queued": s.flusher.EventCount(),
+		},
 	}
 
 	c.JSON(http.StatusOK, resp)
 }
 
+// computeMeshState determines the overall mesh state.
+func (s *Server) computeMeshState(ctx context.Context, members []*types.MemberInfo) types.MeshState {
+	if len(members) == 0 {
+		return types.MeshStateOffline
+	}
+
+	// Check if policy is loaded
+	if s.policyEvaluator != nil {
+		policy := s.policyEvaluator.GetPolicy(ctx)
+		if policy == nil {
+			return types.MeshStateDegraded
+		}
+	}
+
+	// Check member health
+	healthyCount := 0
+	for _, m := range members {
+		if m.Status == "healthy" || m.Status == "" {
+			healthyCount++
+		}
+	}
+	if healthyCount == 0 {
+		return types.MeshStateOffline
+	}
+	if healthyCount < len(members) {
+		return types.MeshStateDegraded
+	}
+
+	return types.MeshStateReady
+}
+
 // handleTelemetryFlush handles POST /api/v1/telemetry/flush.
 func (s *Server) handleTelemetryFlush(c *gin.Context) {
-	var req struct {
-		Types []string `json:"types"`
-	}
+	var req types.TelemetryFlushRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		s.log.Error("Invalid telemetry flush request", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request format"})
@@ -248,11 +345,7 @@ func (s *Server) handleTelemetryFlush(c *gin.Context) {
 		}
 	}
 
-	flushReq := &types.TelemetryFlushRequest{
-		Types: req.Types,
-	}
-
-	resp, err := s.flusher.FlushRequest(c.Request.Context(), flushReq)
+	resp, err := s.flusher.FlushRequest(c.Request.Context(), &req)
 	if err != nil {
 		s.log.Error("Telemetry flush error", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

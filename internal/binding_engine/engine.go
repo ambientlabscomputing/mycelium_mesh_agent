@@ -8,6 +8,7 @@ import (
 
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/discovery"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/telemetry"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
 )
 
@@ -39,6 +40,8 @@ type Engine struct {
 	registry         *discovery.Registry
 	policyEvaluator  policy_evaluator.PolicyEvaluator
 	grants           *GrantManager
+	telemetryBuffer  *telemetry.Buffer
+	collector        *telemetry.Collector
 	expirationTicker *time.Ticker
 	stopCh           chan struct{}
 }
@@ -48,6 +51,8 @@ func NewEngine(
 	log *slog.Logger,
 	registry *discovery.Registry,
 	policyEvaluator policy_evaluator.PolicyEvaluator,
+	telemetryBuffer *telemetry.Buffer,
+	collector *telemetry.Collector,
 ) *Engine {
 	// Use configurable expiration check interval
 	expirationInterval := ExpirationCheckInterval
@@ -57,6 +62,8 @@ func NewEngine(
 		registry:         registry,
 		policyEvaluator:  policyEvaluator,
 		grants:           NewGrantManager(),
+		telemetryBuffer:  telemetryBuffer,
+		collector:        collector,
 		expirationTicker: time.NewTicker(expirationInterval),
 		stopCh:           make(chan struct{}),
 	}
@@ -100,6 +107,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 	capability := e.registry.GetCapability(req.Capability.ID)
 	if capability == nil {
 		logger.Warn("Capability not found")
+		e.emitBindingDenied(req, types.ReasonCapabilityUnknown)
 		return &types.BindingResponse{
 			Decision:   types.BindingDeny,
 			ReasonCode: types.ReasonCapabilityUnknown,
@@ -111,6 +119,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 	clientService := e.registry.GetService(req.Client.ServiceID)
 	if clientService == nil {
 		logger.Warn("Client service not found")
+		e.emitBindingDenied(req, types.ReasonNoProviderAvailable)
 		return &types.BindingResponse{
 			Decision:   types.BindingDeny,
 			ReasonCode: types.ReasonNoProviderAvailable,
@@ -122,6 +131,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 	candidates := e.registry.GetProviders(req.Capability.ID)
 	if len(candidates) == 0 {
 		logger.Info("No providers available for capability")
+		e.emitBindingDenied(req, types.ReasonNoProviderAvailable)
 		return &types.BindingResponse{
 			Decision:   types.BindingDeny,
 			ReasonCode: types.ReasonNoProviderAvailable,
@@ -137,6 +147,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 	sorted := e.registry.SortProvidersByLocality(candidates, clientService.NodeID, preference)
 	if len(sorted) == 0 {
 		logger.Info("No providers match locality preference")
+		e.emitBindingDenied(req, types.ReasonNoProviderAvailable)
 		return &types.BindingResponse{
 			Decision:   types.BindingDeny,
 			ReasonCode: types.ReasonNoProviderAvailable,
@@ -182,6 +193,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 			grant, err := e.grants.IssueGrant(grantReq)
 			if err != nil {
 				logger.Error("Failed to issue grant", "error", err, "provider", provider.ServiceID)
+				e.emitBindingDenied(req, types.ReasonInternalError)
 				return &types.BindingResponse{
 					Decision:   types.BindingDeny,
 					ReasonCode: types.ReasonInternalError,
@@ -190,6 +202,7 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 			}
 
 			logger.Info("Binding approved", "provider", provider.ServiceID)
+			e.emitBindingGranted(grant, req, provider)
 
 			return &types.BindingResponse{
 				Decision:   types.BindingAllow,
@@ -216,10 +229,48 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 
 	// No acceptable provider found
 	logger.Info("No acceptable provider found")
+	e.emitBindingDenied(req, types.ReasonPolicyDenied)
 	return &types.BindingResponse{
 		Decision:   types.BindingDeny,
 		ReasonCode: types.ReasonPolicyDenied,
 		BindingID:  req.RequestID,
+	}
+}
+
+// emitBindingGranted records a granted binding in telemetry buffer and collector.
+func (e *Engine) emitBindingGranted(grant *BindingGrant, req *types.BindingRequest, provider *types.Provider) {
+	if e.telemetryBuffer != nil {
+		_ = e.telemetryBuffer.RecordBindingGranted(&types.MeshBindingGrantedEvent{
+			BindingID:           grant.BindingID,
+			ClientServiceID:     req.Client.ServiceID,
+			ProviderServiceID:   provider.ServiceID,
+			CapabilityID:        req.Capability.ID,
+			ExpiresAt:           grant.ExpiresAt,
+			EnforcedConstraints: req.Constraints,
+			GrantedAt:           grant.CreatedAt,
+		})
+	}
+	if e.collector != nil {
+		e.collector.RecordBindingGranted(req.Capability.ID)
+	}
+}
+
+// emitBindingDenied records a denied binding in telemetry buffer and collector.
+func (e *Engine) emitBindingDenied(req *types.BindingRequest, reason types.ReasonCode) {
+	if req == nil {
+		return
+	}
+	if e.telemetryBuffer != nil {
+		_ = e.telemetryBuffer.RecordBindingDenied(&types.MeshBindingDeniedEvent{
+			RequestID:       req.RequestID,
+			ClientServiceID: req.Client.ServiceID,
+			CapabilityID:    req.Capability.ID,
+			ReasonCode:      reason,
+			DeniedAt:        time.Now(),
+		})
+	}
+	if e.collector != nil {
+		e.collector.RecordBindingDenied(req.Capability.ID, reason)
 	}
 }
 
@@ -254,7 +305,22 @@ func (e *Engine) RevokeBinding(ctx context.Context, bindingID string, reason str
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.grants.RevokeGrant(bindingID, reason)
+	if err := e.grants.RevokeGrant(bindingID, reason); err != nil {
+		return err
+	}
+
+	if e.telemetryBuffer != nil {
+		_ = e.telemetryBuffer.RecordBindingRevoked(&types.MeshBindingRevokedEvent{
+			BindingID: bindingID,
+			Reason:    reason,
+			RevokedAt: time.Now(),
+		})
+	}
+	if e.collector != nil {
+		e.collector.RecordBindingRevoked()
+	}
+
+	return nil
 }
 
 // ListActiveBindings returns all active bindings.
@@ -262,16 +328,7 @@ func (e *Engine) ListActiveBindings(ctx context.Context) []*types.BindingStatus 
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	grants := e.grants.ListActiveGrants()
-	result := make([]*types.BindingStatus, 0, len(grants))
-
-	for _, grant := range grants {
-		// Create a basic status from grant
-		// This will be updated when BindingStatus is properly defined
-		_ = grant
-	}
-
-	return result
+	return e.grants.ListActiveGrants()
 }
 
 // Start initializes the binding engine and starts background tasks.

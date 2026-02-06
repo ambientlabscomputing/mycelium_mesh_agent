@@ -157,37 +157,32 @@ func (e *Evaluator) checkProvenance(provider *types.Provider, cap *types.Capabil
 }
 
 // evaluatePolicy applies policy rules to the binding request.
+// RFC §11.2 defaults: low=allow, medium=allow if trust>=certified, high=deny
 func (e *Evaluator) evaluatePolicy(req *types.BindingRequest, cap *types.Capability, provider *types.Provider) (types.BindingDecision, types.ReasonCode) {
-	// Apply default decision based on risk class
-	defaultDecision := e.getDefaultDecision(cap.RiskClass)
-
-	// Check matching rules in policy
+	// Check matching rules in policy (highest priority first)
 	for _, rule := range e.policy.Rules {
-		// For now, rules are stored as map[string]PolicyRule in mesh.go
-		// Simplified matching logic
 		if rule.Decision == types.BindingAllow {
 			return types.BindingAllow, ""
 		}
+		if rule.Decision == types.BindingDeny {
+			return types.BindingDeny, types.ReasonPolicyDenied
+		}
 	}
 
-	// No rule matched, use default
-	if defaultDecision == types.BindingAllow {
-		return types.BindingAllow, ""
-	}
-	return types.BindingDeny, types.ReasonPolicyDenied
-}
-
-// getDefaultDecision returns default decision for risk class per RFC §8.1.
-func (e *Evaluator) getDefaultDecision(riskClass types.RiskClass) types.BindingDecision {
-	switch riskClass {
+	// No explicit rule matched; apply risk-class defaults per RFC §11.2
+	switch cap.RiskClass {
 	case types.RiskClassLow:
-		return types.BindingAllow
+		return types.BindingAllow, ""
 	case types.RiskClassMedium:
-		return types.BindingDeny
+		// RFC §11.2: "medium risk → allow if trust tier ≥ certified"
+		if e.checkTrustTier(provider, types.TrustTierCertified) {
+			return types.BindingAllow, ""
+		}
+		return types.BindingDeny, types.ReasonTrustTierInsufficient
 	case types.RiskClassHigh:
-		return types.BindingDeny
+		return types.BindingDeny, types.ReasonPolicyDenied
 	default:
-		return types.BindingDeny
+		return types.BindingDeny, types.ReasonPolicyDenied
 	}
 }
 
@@ -316,14 +311,14 @@ func (e *Evaluator) GetPolicy(ctx context.Context) *types.MeshPolicy {
 	return e.policy
 }
 
-// defaultPolicy returns RFC §8.1 default policy.
+// defaultPolicy returns RFC §11.2 default policy.
 func defaultPolicy() *types.MeshPolicy {
 	return &types.MeshPolicy{
 		Version: "1.0.0",
 		Rules:   make(map[string]types.PolicyRule),
 		Defaults: types.PolicyDefaults{
 			LowRisk:      types.BindingAllow,
-			MediumRisk:   types.BindingDeny,
+			MediumRisk:   types.BindingAllow, // conditional: allow if trust >= certified
 			HighRisk:     types.BindingDeny,
 			MinTrustTier: types.TrustTierCertified,
 		},

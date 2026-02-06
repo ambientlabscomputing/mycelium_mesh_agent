@@ -85,16 +85,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// Wire policy evaluator into event consumer for policy updates
 	l.eventConsumer.SetPolicyEvaluator(l.policyEvaluator)
 
-	// Initialize binding engine
-	l.bindingEngine = binding_engine.NewEngine(logger, l.registry, l.policyEvaluator)
-
-	if err := l.bindingEngine.Start(ctx); err != nil {
-		logger.Error("failed to start binding engine", "error", err)
-		return err
-	}
-	logger.Info("binding engine started")
-
-	// Initialize telemetry
+	// Initialize telemetry (before binding engine so it can emit audit events)
 	telemetryConfig := l.config.GetTelemetryConfig()
 	l.telemetryBuffer = telemetry.NewBuffer(telemetryConfig.BufferSizeBytes, telemetryConfig.FlushIntervalMs)
 	l.collector = telemetry.NewCollector(telemetryConfig.FlushIntervalMs)
@@ -106,12 +97,22 @@ func (l *Launcher) Start(ctx context.Context) error {
 	}
 	logger.Info("telemetry initialized")
 
+	// Initialize binding engine (with telemetry for audit event emission)
+	l.bindingEngine = binding_engine.NewEngine(logger, l.registry, l.policyEvaluator, l.telemetryBuffer, l.collector)
+
+	if err := l.bindingEngine.Start(ctx); err != nil {
+		logger.Error("failed to start binding engine", "error", err)
+		return err
+	}
+	logger.Info("binding engine started")
+
 	// Initialize API server
 	apiServer := server.NewServer(
 		logger,
 		l.bindingEngine,
 		l.registry,
 		l.flusher,
+		l.policyEvaluator,
 		l.config,
 		8080,
 	)

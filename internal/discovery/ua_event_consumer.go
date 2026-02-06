@@ -473,8 +473,17 @@ func (ec *EventConsumer) HandleEvent(ctx context.Context, event *types.UAEvent) 
 	case types.EventIdentityTrustRootsUpdated:
 		return ec.handleIdentityTrustRoots(ctx, event)
 
+	case types.EventIdentityServiceIssued:
+		return ec.handleIdentityServiceIssued(ctx, event)
+
+	case types.EventIdentityServiceRevoked:
+		return ec.handleIdentityServiceRevoked(ctx, event)
+
 	case types.EventMeshPolicyUpdated:
 		return ec.handleMeshPolicyUpdated(ctx, event)
+
+	case types.EventConsentStateUpdated:
+		return ec.handleConsentStateUpdated(ctx, event)
 
 	default:
 		logger.Warn("unknown event type", "event_type", event.EventType)
@@ -787,6 +796,107 @@ func (ec *EventConsumer) handleMeshPolicyUpdated(ctx context.Context, event *typ
 		}
 		logger.Info("policy evaluator updated", "version", policy.Version)
 	}
+	return nil
+}
+
+func (ec *EventConsumer) handleIdentityServiceIssued(ctx context.Context, event *types.UAEvent) error {
+	logger := logging.GetLogger(ctx)
+
+	payload := &types.IdentityServiceIssuedPayload{}
+	if err := unmarshalPayload(event.Payload, payload); err != nil {
+		logger.Error("failed to unmarshal identity.service.issued payload", "error", err)
+		return err
+	}
+
+	// Update the service entry in the registry with the new identity
+	service := ec.registry.GetService(payload.ServiceID)
+	if service != nil {
+		service.ServiceIdentity = payload.SpiffeID
+		ec.registry.AddOrUpdateService(service)
+	}
+
+	// Update any providers associated with this service
+	allProviders := ec.registry.ListAllProviders()
+	for capID, providers := range allProviders {
+		for _, p := range providers {
+			if p.ServiceID == payload.ServiceID {
+				p.ServiceIdentity = payload.SpiffeID
+				ec.registry.AddOrUpdateProvider(capID, p)
+			}
+		}
+	}
+
+	logger.Info("identity issued for service",
+		"service_id", payload.ServiceID,
+		"spiffe_id", payload.SpiffeID,
+		"expires_at", payload.ExpiresAt)
+	return nil
+}
+
+func (ec *EventConsumer) handleIdentityServiceRevoked(ctx context.Context, event *types.UAEvent) error {
+	logger := logging.GetLogger(ctx)
+
+	payload := &types.IdentityServiceRevokedPayload{}
+	if err := unmarshalPayload(event.Payload, payload); err != nil {
+		logger.Error("failed to unmarshal identity.service.revoked payload", "error", err)
+		return err
+	}
+
+	// Clear the service identity — the service can no longer be used as a provider
+	service := ec.registry.GetService(payload.ServiceID)
+	if service != nil {
+		service.ServiceIdentity = ""
+		service.Status = "identity_revoked"
+		ec.registry.AddOrUpdateService(service)
+	}
+
+	// Mark all providers for this service as unavailable
+	allProviders := ec.registry.ListAllProviders()
+	for capID, providers := range allProviders {
+		for _, p := range providers {
+			if p.ServiceID == payload.ServiceID {
+				p.Available = false
+				p.ServiceIdentity = ""
+				ec.registry.AddOrUpdateProvider(capID, p)
+			}
+		}
+	}
+
+	logger.Info("identity revoked for service",
+		"service_id", payload.ServiceID,
+		"reason", payload.Reason,
+		"revoked_at", payload.RevokedAt)
+	return nil
+}
+
+func (ec *EventConsumer) handleConsentStateUpdated(ctx context.Context, event *types.UAEvent) error {
+	logger := logging.GetLogger(ctx)
+
+	payload := &types.ConsentStateUpdatedPayload{}
+	if err := unmarshalPayload(event.Payload, payload); err != nil {
+		logger.Error("failed to unmarshal consent_state.updated payload", "error", err)
+		return err
+	}
+
+	ec.mu.RLock()
+	policyEval := ec.policy
+	ec.mu.RUnlock()
+
+	if policyEval == nil {
+		logger.Warn("consent update received but no policy evaluator set")
+		return nil
+	}
+
+	consented := payload.Decision == "allow" || payload.Decision == "granted"
+	if err := policyEval.UpdateConsent(ctx, payload.SubjectRef, payload.CapabilityID, consented); err != nil {
+		logger.Error("failed to update consent", "error", err)
+		return err
+	}
+
+	logger.Info("consent state updated",
+		"subject_ref", payload.SubjectRef,
+		"capability_id", payload.CapabilityID,
+		"decision", payload.Decision)
 	return nil
 }
 

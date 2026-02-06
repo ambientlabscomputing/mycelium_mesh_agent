@@ -10,11 +10,17 @@ import (
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
 )
 
+// bufferedEvent wraps an event with a timestamp
+type bufferedEvent struct {
+	event     interface{}
+	timestamp time.Time
+}
+
 // Buffer collects and buffers telemetry and audit events
 // Events are retained locally until flushed to UA
 type Buffer struct {
 	mu            sync.RWMutex
-	events        []interface{} // all events
+	events        []bufferedEvent // all events with timestamps
 	maxSizeBytes  int
 	currentSize   int
 	flushTicker   *time.Ticker
@@ -37,7 +43,7 @@ func NewBuffer(maxSizeBytes int, flushIntervalMs int) *Buffer {
 		flushIntervalMs = MinFlushInterval
 	}
 	return &Buffer{
-		events:        make([]interface{}, 0),
+		events:        make([]bufferedEvent, 0),
 		maxSizeBytes:  maxSizeBytes,
 		flushInterval: time.Duration(flushIntervalMs) * time.Millisecond,
 	}
@@ -110,7 +116,7 @@ func (b *Buffer) recordEvent(event interface{}) error {
 		removed := 0
 		for b.currentSize+eventSize > b.maxSizeBytes && len(b.events) > removed {
 			// Remove oldest event (FIFO)
-			oldestData, _ := json.Marshal(b.events[removed])
+			oldestData, _ := json.Marshal(b.events[removed].event)
 			b.currentSize -= len(oldestData)
 			removed++
 		}
@@ -126,7 +132,11 @@ func (b *Buffer) recordEvent(event interface{}) error {
 		}
 	}
 
-	b.events = append(b.events, event)
+	// Wrap event with timestamp
+	b.events = append(b.events, bufferedEvent{
+		event:     event,
+		timestamp: time.Now(),
+	})
 	b.currentSize += eventSize
 
 	return nil
@@ -137,22 +147,49 @@ func (b *Buffer) GetEvents() []interface{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	events := b.events
-	b.events = make([]interface{}, 0)
+	// Unwrap events from bufferedEvent wrappers
+	result := make([]interface{}, 0, len(b.events))
+	for _, be := range b.events {
+		result = append(result, be.event)
+	}
+
+	b.events = make([]bufferedEvent, 0)
 	b.currentSize = 0
 	b.collectedAt = time.Now()
 
-	return events
+	return result
 }
 
 // GetEventsSince returns events recorded since given time
 func (b *Buffer) GetEventsSince(since time.Time) []interface{} {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	// For simplicity, return all events
-	// In production, would need to timestamp events
-	return b.events
+	// Filter events by timestamp and unwrap
+	result := make([]interface{}, 0)
+	retained := make([]bufferedEvent, 0)
+
+	for _, be := range b.events {
+		if be.timestamp.After(since) || be.timestamp.Equal(since) {
+			result = append(result, be.event)
+		} else {
+			// Retain events that don't match the filter
+			retained = append(retained, be)
+		}
+	}
+
+	// Update buffer to only contain events not returned
+	// Recalculate current size for retained events
+	b.events = retained
+	newSize := 0
+	for _, be := range retained {
+		data, _ := json.Marshal(be.event)
+		newSize += len(data)
+	}
+	b.currentSize = newSize
+	b.collectedAt = time.Now()
+
+	return result
 }
 
 // EventCount returns the number of buffered events
@@ -174,6 +211,6 @@ func (b *Buffer) Clear() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.events = make([]interface{}, 0)
+	b.events = make([]bufferedEvent, 0)
 	b.currentSize = 0
 }

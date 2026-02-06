@@ -49,7 +49,15 @@ func (f *Flusher) FlushRequest(ctx context.Context, req *types.TelemetryFlushReq
 
 	// Flush audit events from buffer
 	if shouldFlushAudit {
-		events := f.buffer.GetEvents()
+		var events []interface{}
+		if req.Since != nil {
+			// Flush only events since the specified time
+			events = f.buffer.GetEventsSince(*req.Since)
+			logger.Info("flushing audit events since timestamp", "since", req.Since, "count", len(events))
+		} else {
+			// Flush all events
+			events = f.buffer.GetEvents()
+		}
 		response.Events = append(response.Events, events...)
 
 		auditCount := len(events)
@@ -114,4 +122,14 @@ func (f *Flusher) GetMetrics(ctx context.Context) map[string]interface{} {
 // GetHealthStatus returns the health status based on metrics
 func (f *Flusher) GetHealthStatus(ctx context.Context) string {
 	return f.collector.HealthStatus(ctx)
+}
+
+// BufferSizeBytes returns the current buffer size in bytes.
+func (f *Flusher) BufferSizeBytes() int {
+	return f.buffer.BufferSize()
+}
+
+// EventCount returns the number of buffered audit events.
+func (f *Flusher) EventCount() int {
+	return f.buffer.EventCount()
 }
