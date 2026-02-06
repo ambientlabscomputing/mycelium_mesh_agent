@@ -1,4 +1,4 @@
-package serve
+package main
 
 import (
 	"context"
@@ -60,13 +60,9 @@ func (l *Launcher) Start(ctx context.Context) error {
 	l.registry = discovery.NewRegistry()
 	logger.Info("registry initialized")
 
-	// Initialize discovery
-	discoveryConfig := l.config.GetDiscoveryConfig()
-	l.eventConsumer = discovery.NewEventConsumer(l.registry, discovery.UAEventConsumerConfig{
-		StreamEndpoint:    discoveryConfig.MDNSServiceName,
-		ReconnectInterval: 5 * time.Second,
-		BufferSize:        1000,
-	})
+	// Initialize discovery with ControlChannelConfig
+	controlChannelConfig := l.config.GetControlChannelConfig()
+	l.eventConsumer = discovery.NewEventConsumer(l.registry, controlChannelConfig)
 
 	if err := l.eventConsumer.Start(ctx); err != nil {
 		logger.Error("failed to start event consumer", "error", err)
@@ -85,6 +81,9 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// Initialize policy evaluator
 	l.policyEvaluator = policy_evaluator.NewEvaluator(logger, capCache)
 	logger.Info("policy evaluator initialized")
+
+	// Wire policy evaluator into event consumer for policy updates
+	l.eventConsumer.SetPolicyEvaluator(l.policyEvaluator)
 
 	// Initialize binding engine
 	l.bindingEngine = binding_engine.NewEngine(logger, l.registry, l.policyEvaluator)
@@ -191,11 +190,16 @@ func (r *Runtime) Run(ctx context.Context) error {
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Start launcher
+	// Start launcher - only send to errChan on actual errors
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- r.launcher.Start(runtimeCtx)
+		if err := r.launcher.Start(runtimeCtx); err != nil {
+			logger.Error("launcher start failed", "error", err)
+			errChan <- err
+		}
 	}()
+
+	logger.Info("runtime running - waiting for signal")
 
 	// Wait for signal or error
 	select {
@@ -219,7 +223,41 @@ func (r *Runtime) Run(ctx context.Context) error {
 
 		case syscall.SIGHUP:
 			logger.Info("received SIGHUP - reloading config")
-			// TODO: Implement config reload
+			if r.launcher != nil && r.launcher.config != nil {
+				oldCfg := r.launcher.config.Get()
+				cfg := r.launcher.config.Get()
+				if err := r.launcher.config.ValidateConfig(cfg); err != nil {
+					logger.Error("config reload failed", "error", err)
+					break
+				}
+
+				// Check if ControlChannelConfig changed
+				oldCtrl := oldCfg.ControlChannelConfig
+				newCtrl := cfg.ControlChannelConfig
+				configChanged := oldCtrl.Address != newCtrl.Address ||
+					oldCtrl.Transport != newCtrl.Transport ||
+					oldCtrl.TLSEnabled != newCtrl.TLSEnabled
+
+				cfg.AppliedAt = time.Now()
+				r.launcher.config.Set(cfg)
+				logger.Info("config reloaded", "version", cfg.ConfigVersion)
+
+				// Restart event consumer if control channel config changed
+				if configChanged && r.launcher.eventConsumer != nil {
+					logger.Info("control channel config changed - restarting event consumer")
+					if err := r.launcher.eventConsumer.Stop(runtimeCtx); err != nil {
+						logger.Error("failed to stop event consumer", "error", err)
+					}
+					time.Sleep(100 * time.Millisecond) // Brief pause before restart
+					if err := r.launcher.eventConsumer.Start(runtimeCtx); err != nil {
+						logger.Error("failed to restart event consumer", "error", err)
+					} else {
+						logger.Info("event consumer restarted with new config")
+					}
+				}
+			} else {
+				logger.Warn("config reload skipped - no config store")
+			}
 
 		default:
 			logger.Warn("received unexpected signal", "signal", sig)
@@ -268,4 +306,9 @@ func Serve() error {
 	return runtime.Run(ctx)
 }
 
-// func main() would be in the actual main.go file
+// main is the entry point for the Mycelium Mesh Agent
+func main() {
+	if err := Serve(); err != nil {
+		os.Exit(1)
+	}
+}

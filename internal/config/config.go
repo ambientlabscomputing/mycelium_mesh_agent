@@ -165,8 +165,8 @@ func DefaultMMAConfig() *MMAConfig {
 		},
 		ControlChannelConfig: ControlChannelConfig{
 			Transport:           "grpc_uds",
-			Address:             "/tmp/ua.sock",
-			TLSEnabled:          true,
+			Address:             "/tmp/ua_mma.sock",
+			TLSEnabled:          false,
 			ReconnectIntervalMs: 5000,
 		},
 		DiscoveryConfig: DiscoveryConfig{

@@ -1,6 +1,8 @@
 package binding_engine
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -48,7 +50,21 @@ func NewGrantManager() *GrantManager {
 }
 
 // IssueGrant creates and stores a new grant
-func (gm *GrantManager) IssueGrant(req *GrantRequest) *BindingGrant {
+func (gm *GrantManager) IssueGrant(req *GrantRequest) (*BindingGrant, error) {
+	// Validate request
+	if req == nil {
+		return nil, types.ErrInvalidBindingRequest
+	}
+	if req.ClientServiceID == "" {
+		return nil, types.ErrInvalidBindingRequest
+	}
+	if req.ProviderServiceID == "" {
+		return nil, types.ErrInvalidBindingRequest
+	}
+	if req.CapabilityID == "" {
+		return nil, types.ErrInvalidBindingRequest
+	}
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
@@ -58,7 +74,7 @@ func (gm *GrantManager) IssueGrant(req *GrantRequest) *BindingGrant {
 	// Calculate expiration
 	ttl := time.Duration(req.TTLMs) * time.Millisecond
 	if ttl == 0 {
-		ttl = 1 * time.Hour // Default 1 hour
+		ttl = DefaultGrantTTL
 	}
 	expiresAt := time.Now().Add(ttl)
 
@@ -81,26 +97,38 @@ func (gm *GrantManager) IssueGrant(req *GrantRequest) *BindingGrant {
 	}
 
 	gm.grants[bindingID] = grant
-	return grant
+	return grant, nil
 }
 
 // GetGrant returns a grant by ID
-func (gm *GrantManager) GetGrant(bindingID string) *BindingGrant {
-	gm.mu.RLock()
-	defer gm.mu.RUnlock()
+func (gm *GrantManager) GetGrant(bindingID string) (*BindingGrant, error) {
+	if bindingID == "" {
+		return nil, types.ErrInvalidBindingRequest
+	}
 
-	grant, _ := gm.grants[bindingID]
-	return grant
-}
-
-// GetGrantStatus returns status of a grant
-func (gm *GrantManager) GetGrantStatus(bindingID string) (*types.BindingStatus, error) {
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
 
 	grant, exists := gm.grants[bindingID]
 	if !exists {
-		return nil, nil
+		return nil, types.ErrBindingNotFound
+	}
+
+	return grant, nil
+}
+
+// GetGrantStatus returns status of a grant
+func (gm *GrantManager) GetGrantStatus(bindingID string) (*types.BindingStatus, error) {
+	if bindingID == "" {
+		return nil, types.ErrInvalidBindingRequest
+	}
+
+	gm.mu.RLock()
+	defer gm.mu.RUnlock()
+
+	grant, exists := gm.grants[bindingID]
+	if !exists {
+		return nil, types.ErrBindingNotFound
 	}
 
 	return &types.BindingStatus{
@@ -117,15 +145,22 @@ func (gm *GrantManager) GetGrantStatus(bindingID string) (*types.BindingStatus, 
 }
 
 // RevokeGrant revokes a grant
-func (gm *GrantManager) RevokeGrant(bindingID string, reason string) {
+func (gm *GrantManager) RevokeGrant(bindingID string, reason string) error {
+	if bindingID == "" {
+		return types.ErrInvalidBindingRequest
+	}
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	grant, exists := gm.grants[bindingID]
-	if exists {
-		grant.State = types.BindingStateRevoked
-		grant.LastError = reason
+	if !exists {
+		return types.ErrBindingNotFound
 	}
+
+	grant.State = types.BindingStateRevoked
+	grant.LastError = reason
+	return nil
 }
 
 // ListActiveGrants returns all active grants
@@ -243,17 +278,11 @@ func min(a, b float64) float64 {
 }
 
 // Helper to generate unique binding IDs
-// TODO: Replace with proper UUID generation
 func generateID() string {
-	return "binding-" + time.Now().Format("20060102150405") + "-" + randomString(8)
-}
-
-// randomString generates a random string for IDs
-func randomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[int(time.Now().UnixNano())%len(charset)]
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// Fallback to time-based ID if crypto/rand fails
+		return "binding-" + time.Now().Format("20060102150405")
 	}
-	return string(b)
+	return "binding-" + hex.EncodeToString(buf)
 }

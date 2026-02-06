@@ -24,6 +24,18 @@ type Buffer struct {
 
 // NewBuffer creates a new telemetry buffer
 func NewBuffer(maxSizeBytes int, flushIntervalMs int) *Buffer {
+	if maxSizeBytes <= 0 {
+		maxSizeBytes = DefaultBufferSize
+	}
+	if maxSizeBytes > MaxBufferSize {
+		maxSizeBytes = MaxBufferSize
+	}
+	if flushIntervalMs <= 0 {
+		flushIntervalMs = DefaultFlushInterval
+	}
+	if flushIntervalMs < MinFlushInterval {
+		flushIntervalMs = MinFlushInterval
+	}
 	return &Buffer{
 		events:        make([]interface{}, 0),
 		maxSizeBytes:  maxSizeBytes,
@@ -92,11 +104,26 @@ func (b *Buffer) recordEvent(event interface{}) error {
 	}
 	eventSize := len(data)
 
-	// Check if adding this event would exceed buffer size
-	if b.currentSize+eventSize > b.maxSizeBytes {
-		// Buffer full, would need to flush or drop
-		// For now, we'll allow overflow but log it
-		// In production, might drop oldest events or return error
+	// Check if buffer is at capacity - implement bounded buffer with drop-oldest strategy
+	if b.currentSize+eventSize > b.maxSizeBytes && len(b.events) > 0 {
+		// Remove oldest events until we have space
+		removed := 0
+		for b.currentSize+eventSize > b.maxSizeBytes && len(b.events) > removed {
+			// Remove oldest event (FIFO)
+			oldestData, _ := json.Marshal(b.events[removed])
+			b.currentSize -= len(oldestData)
+			removed++
+		}
+
+		// Shift array to remove dropped events
+		if removed > 0 {
+			b.events = b.events[removed:]
+		}
+
+		// If still can't fit, reject this single event if it's too large
+		if eventSize > b.maxSizeBytes {
+			return types.ErrTelemetryBufferFull
+		}
 	}
 
 	b.events = append(b.events, event)

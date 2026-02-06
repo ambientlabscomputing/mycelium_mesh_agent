@@ -26,6 +26,8 @@ var (
 	ErrInvalidPolicyDocument  = errors.New("invalid policy document")
 	ErrTelemetryBufferFull    = errors.New("telemetry buffer full")
 	ErrFailedToFlushTelemetry = errors.New("failed to flush telemetry to UA")
+	ErrInvalidBindingRequest  = errors.New("invalid binding request")
+	ErrBindingNotFound        = errors.New("binding not found")
 	ErrServiceUnhealthy       = errors.New("service is unhealthy")
 	ErrServiceOffline         = errors.New("service is offline")
 	ErrConnectionFailed       = errors.New("connection to service failed")

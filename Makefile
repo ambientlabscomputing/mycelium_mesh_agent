@@ -33,3 +33,12 @@ fmt:
 .PHONY: lint
 lint:
 	golangci-lint run ./...
+
+## proto: Generate Go code from proto files
+.PHONY: proto
+proto:
+	@echo "Generating Go code from proto files..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		proto/ua_mma/v1/event_stream.proto
+	@echo "✓ Proto code generated"

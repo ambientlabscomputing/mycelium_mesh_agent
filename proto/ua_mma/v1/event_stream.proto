@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package ua_mma.v1;
+
+option go_package = "github.com/AmbientLabs/underleaf/mycelium_mesh_agent/proto/ua_mma/v1;ua_mmav1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// UAEventStreamService provides a server-streaming RPC for the Underleaf Agent
+// to publish membership, lifecycle, policy, and capability cache events to
+// the Mycelium Mesh Agent.
+//
+// Interface Contract: §3 UA → MMA Event Stream
+service UAEventStreamService {
+  // StreamEvents establishes a server-side streaming RPC where the UA pushes
+  // events to the MMA. The MMA provides last_seen_seq for resumption and can
+  // optionally filter by event types.
+  rpc StreamEvents(StreamEventsRequest) returns (stream UAEvent);
+}
+
+// StreamEventsRequest configures event stream subscription.
+message StreamEventsRequest {
+  // last_seen_seq is a map of node_id → last sequence number seen by the MMA.
+  // The UA uses this for catch-up: it will replay events from last_seen_seq+1
+  // onwards per node, then stream live events.
+  map<string, uint64> last_seen_seq = 1;
+
+  // event_type_filter restricts which event types to receive. If empty, all
+  // event types are streamed. Example values: "cluster.snapshot",
+  // "service.started", "mesh_policy.updated".
+  repeated string event_type_filter = 2;
+
+  // buffer_size_hint suggests the per-subscriber buffer size on the UA side
+  // (in number of events, not bytes). The UA may clamp this to its own limits.
+  // Default: 1000 events.
+  uint32 buffer_size_hint = 3;
+}
+
+// UAEvent is the envelope for all UA→MMA events. The event_type field
+// determines the structure of the payload.
+//
+// Interface Contract: §3.1 Event Envelope
+message UAEvent {
+  // event_id is globally unique (UUID/ULID).
+  string event_id = 1;
+
+  // event_type determines the payload structure. Examples:
+  //   - "cluster.snapshot"
+  //   - "member.joined"
+  //   - "member.updated"
+  //   - "member.left"
+  //   - "member.health"
+  //   - "identity.trust_roots.updated"
+  //   - "identity.service.issued"
+  //   - "identity.service.revoked"
+  //   - "service.started"
+  //   - "service.updated"
+  //   - "service.stopped"
+  //   - "capability_cache.snapshot.updated"
+  //   - "capability_cache.delta.updated"
+  //   - "mesh_policy.updated"
+  //   - "consent_state.updated"
+  string event_type = 2;
+
+  // emitted_at is the RFC3339 timestamp when the UA emitted the event.
+  google.protobuf.Timestamp emitted_at = 3;
+
+  // cluster_id identifies the cluster.
+  string cluster_id = 4;
+
+  // node_id is the origin node that emitted the event.
+  string node_id = 5;
+
+  // seq is a monotonically increasing sequence number per node_id.
+  // Used for ordering and catch-up (last_seen_seq).
+  uint64 seq = 6;
+
+  // entity_ref optionally identifies the entity this event concerns.
+  EntityRef entity_ref = 7;
+
+  // payload contains the event-specific data as a flexible JSON-like structure.
+  // The MMA unmarshals this based on event_type.
+  google.protobuf.Struct payload = 8;
+
+  // signature is an optional UA signature over the envelope+payload for
+  // integrity verification. Format: base64-encoded ECDSA signature.
+  string signature = 9;
+}
+
+// EntityRef identifies an entity (member, service, capability, policy).
+message EntityRef {
+  // kind is the entity type: "member", "service", "capability", "policy", etc.
+  string kind = 1;
+
+  // id is the entity's unique identifier.
+  string id = 2;
+}

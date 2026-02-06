@@ -27,6 +27,19 @@ func NewRegistry() *Registry {
 	}
 }
 
+// ReplaceCapabilityCache replaces the capability cache with a new snapshot.
+func (r *Registry) ReplaceCapabilityCache(cache *types.CapabilityCache) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cache == nil {
+		return
+	}
+	if cache.Capabilities == nil {
+		cache.Capabilities = make(map[string]*types.Capability)
+	}
+	r.cache = cache
+}
+
 // AddOrUpdateMember adds or updates a cluster member.
 func (r *Registry) AddOrUpdateMember(member *types.MemberInfo) {
 	r.mu.Lock()
@@ -170,26 +183,22 @@ func (r *Registry) ListAllProviders() map[string][]*types.Provider {
 func (r *Registry) AddOrUpdateCapability(cap *types.Capability) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cache.Capabilities[cap.ID] = cap
+	r.cache.SetCapability(cap.ID, cap)
 }
 
 // GetCapability returns a capability from cache.
 func (r *Registry) GetCapability(capabilityID string) *types.Capability {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.cache.Capabilities[capabilityID]
+	cap, _ := r.cache.GetCapability(capabilityID)
+	return cap
 }
 
 // ListCapabilities returns all capabilities in cache.
 func (r *Registry) ListCapabilities() []*types.Capability {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	result := make([]*types.Capability, 0, len(r.cache.Capabilities))
-	for _, c := range r.cache.Capabilities {
-		result = append(result, c)
-	}
-	return result
+	return r.cache.List()
 }
 
 // CalculateProviderDistance calculates distance between client and provider nodes.

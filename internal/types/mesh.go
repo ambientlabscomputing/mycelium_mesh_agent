@@ -1,6 +1,7 @@
 package types
 
 import (
+	"sync"
 	"time"
 )
 
@@ -13,7 +14,7 @@ type UAEvent struct {
 	EmittedAt time.Time   `json:"emitted_at"`
 	ClusterID string      `json:"cluster_id"`
 	NodeID    string      `json:"node_id"`
-	Seq       int64       `json:"seq"`
+	Seq       uint64      `json:"seq"`
 	EntityRef *EntityRef  `json:"entity_ref,omitempty"`
 	Payload   interface{} `json:"payload"`
 	Signature string      `json:"signature,omitempty"`
@@ -375,10 +376,63 @@ type Capability struct {
 }
 
 type CapabilityCache struct {
-	Version           string                 `json:"version"`
-	Capabilities      map[string]*Capability `json:"capabilities"`
-	SchemaIndexDigest string                 `json:"schema_index_digest"`
-	VerifiedAt        time.Time              `json:"verified_at"`
+	mu                sync.RWMutex           `json:\"-\"`
+	Version           string                 `json:\"version\"`
+	Capabilities      map[string]*Capability `json:\"capabilities\"`
+	SchemaIndexDigest string                 `json:\"schema_index_digest\"`
+	VerifiedAt        time.Time              `json:\"verified_at\"`
+}
+
+// GetCapability returns a capability by ID (thread-safe)
+func (cc *CapabilityCache) GetCapability(id string) (*Capability, bool) {
+	if cc == nil {
+		return nil, false
+	}
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	cap, exists := cc.Capabilities[id]
+	return cap, exists
+}
+
+// SetCapability sets a capability (thread-safe)
+func (cc *CapabilityCache) SetCapability(id string, cap *Capability) {
+	if cc == nil {
+		return
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.Capabilities == nil {
+		cc.Capabilities = make(map[string]*Capability)
+	}
+	cc.Capabilities[id] = cap
+}
+
+// ListCapabilities returns all capability IDs (thread-safe)
+func (cc *CapabilityCache) ListCapabilities() []string {
+	if cc == nil {
+		return nil
+	}
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	ids := make([]string, 0, len(cc.Capabilities))
+	for id := range cc.Capabilities {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// List returns all capabilities (thread-safe)
+func (cc *CapabilityCache) List() []*Capability {
+	if cc == nil {
+		return nil
+	}
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	result := make([]*Capability, 0, len(cc.Capabilities))
+	for _, cap := range cc.Capabilities {
+		result = append(result, cap)
+	}
+	return result
 }
 
 type MeshPolicy struct {

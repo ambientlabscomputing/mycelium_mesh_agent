@@ -93,9 +93,10 @@ func (f *Flusher) SendTelemetrySummary(ctx context.Context) (*types.MeshTelemetr
 
 	summary := f.collector.GenerateSummary()
 	logger.Debug("generated telemetry summary", "interval", summary.Interval)
-
-	// TODO: Send to UA via gRPC control channel
-	// For now, just return it
+	if err := f.BufferEvent(ctx, summary); err != nil {
+		logger.Error("failed to buffer telemetry summary", "error", err)
+		return nil, err
+	}
 	return summary, nil
 }
 

@@ -2,7 +2,6 @@ package binding_engine
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -50,18 +49,51 @@ func NewEngine(
 	registry *discovery.Registry,
 	policyEvaluator policy_evaluator.PolicyEvaluator,
 ) *Engine {
+	// Use configurable expiration check interval
+	expirationInterval := ExpirationCheckInterval
+
 	return &Engine{
 		log:              log,
 		registry:         registry,
 		policyEvaluator:  policyEvaluator,
 		grants:           NewGrantManager(),
-		expirationTicker: time.NewTicker(10 * time.Second),
+		expirationTicker: time.NewTicker(expirationInterval),
 		stopCh:           make(chan struct{}),
 	}
 }
 
 // RequestBinding implements the full binding resolution flow per RFC §8.1.
 func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) *types.BindingResponse {
+	// Input validation
+	if req == nil {
+		e.log.Error("Nil binding request received")
+		return &types.BindingResponse{
+			Decision:   types.BindingDeny,
+			ReasonCode: types.ReasonInternalError,
+		}
+	}
+	if req.Client.ServiceID == "" || req.Capability.ID == "" {
+		e.log.Error("Invalid binding request: missing required fields",
+			"has_client", req.Client.ServiceID != "",
+			"has_capability", req.Capability.ID != "")
+		return &types.BindingResponse{
+			Decision:   types.BindingDeny,
+			ReasonCode: types.ReasonInternalError,
+			BindingID:  req.RequestID,
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		e.log.Warn("Binding request cancelled", "error", ctx.Err())
+		return &types.BindingResponse{
+			Decision:   types.BindingDeny,
+			ReasonCode: types.ReasonInternalError,
+			BindingID:  req.RequestID,
+		}
+	default:
+	}
+
 	logger := e.log.With("request_id", req.RequestID, "client", req.Client.ServiceID, "capability", req.Capability.ID)
 
 	// Step 1: Validate capability exists
@@ -112,11 +144,26 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 		}
 	}
 
-	// Step 5: Evaluate each candidate through policy
+	// Step 5: Evaluate each candidate through policy with provider info
 	for _, provider := range sorted {
-		decision, reason, err := e.policyEvaluator.EvaluateBinding(ctx, req)
+		select {
+		case <-ctx.Done():
+			logger.Warn("Binding request cancelled", "error", ctx.Err())
+			return &types.BindingResponse{
+				Decision:   types.BindingDeny,
+				ReasonCode: types.ReasonInternalError,
+				BindingID:  req.RequestID,
+			}
+		default:
+		}
+		logger.Info("Evaluating policy for provider",
+			"provider", provider.ServiceID,
+			"capability", req.Capability.ID,
+			"trust_tier", provider.TrustTier)
+
+		decision, reason, err := e.policyEvaluator.EvaluateBinding(ctx, req, provider)
 		if err != nil {
-			logger.Error("Policy evaluation error", "error", err)
+			logger.Error("Policy evaluation error", "error", err, "provider", provider.ServiceID)
 			continue
 		}
 
@@ -132,7 +179,15 @@ func (e *Engine) RequestBinding(ctx context.Context, req *types.BindingRequest) 
 				Constraints:       req.Constraints,
 			}
 
-			grant := e.grants.IssueGrant(grantReq)
+			grant, err := e.grants.IssueGrant(grantReq)
+			if err != nil {
+				logger.Error("Failed to issue grant", "error", err, "provider", provider.ServiceID)
+				return &types.BindingResponse{
+					Decision:   types.BindingDeny,
+					ReasonCode: types.ReasonInternalError,
+					BindingID:  req.RequestID,
+				}
+			}
 
 			logger.Info("Binding approved", "provider", provider.ServiceID)
 
@@ -173,14 +228,25 @@ func (e *Engine) GetBinding(ctx context.Context, bindingID string) (*types.Bindi
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	grant := e.grants.GetGrant(bindingID)
-	if grant == nil {
-		return nil, errors.New("binding not found")
+	grant, err := e.grants.GetGrant(bindingID)
+	if err != nil {
+		return nil, err
 	}
 
-	// BindingStatus doesn't exist in types yet, so use a generic response
-	// This will be fixed when we add BindingStatus to mesh.go
-	return nil, nil
+	// Construct BindingStatus from grant
+	status := &types.BindingStatus{
+		BindingID:           grant.BindingID,
+		State:               grant.State,
+		ClientServiceID:     grant.ClientServiceID,
+		ProviderServiceID:   grant.ProviderServiceID,
+		CapabilityID:        grant.CapabilityID,
+		CreatedAt:           grant.CreatedAt,
+		ExpiresAt:           grant.ExpiresAt,
+		EnforcedConstraints: grant.Constraints,
+		LastError:           grant.LastError,
+	}
+
+	return status, nil
 }
 
 // RevokeBinding revokes a binding.
@@ -188,8 +254,7 @@ func (e *Engine) RevokeBinding(ctx context.Context, bindingID string, reason str
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.grants.RevokeGrant(bindingID, reason)
-	return nil
+	return e.grants.RevokeGrant(bindingID, reason)
 }
 
 // ListActiveBindings returns all active bindings.

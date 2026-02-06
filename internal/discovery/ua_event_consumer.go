@@ -4,26 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/config"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/logging"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/transport"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
+	pb "github.com/ambientlabscomputing/mycelium_mesh_agent/proto/ua_mma/v1"
 )
 
 // EventConsumer listens to UA event stream and updates the registry
 // gRPC streaming is used to consume events from UA
 type EventConsumer struct {
 	registry      *Registry
-	config        UAEventConsumerConfig
+	config        config.ControlChannelConfig
+	policy        policy_evaluator.PolicyEvaluator
 	running       bool
 	mu            sync.RWMutex
 	stopChan      chan struct{}
+	eventCh       chan *types.UAEvent
 	eventHandlers map[string]EventHandler
-	processedSeq  map[string]int64 // track last seq per node to handle ordering
+	nodeSequences map[string]uint64 // track last seq per node for resumption
+	trustRoots    *types.IdentityTrustRootsUpdatedPayload
+	tlsCreds      *transport.TLSCredentials
+	grpcConn      *grpc.ClientConn
 }
 
-// UAEventConsumerConfig specifies EventConsumer configuration
+// UAEventConsumerConfig specifies EventConsumer configuration (deprecated, use ControlChannelConfig)
 type UAEventConsumerConfig struct {
 	// StreamEndpoint is the gRPC endpoint for UA event stream
 	StreamEndpoint string
@@ -35,18 +53,45 @@ type UAEventConsumerConfig struct {
 	BufferSize int
 }
 
+const (
+	// MaxReconnectBackoff is the maximum backoff duration between reconnect attempts
+	MaxReconnectBackoff = 5 * time.Minute
+
+	// InitialReconnectBackoff is the initial backoff duration
+	InitialReconnectBackoff = 1 * time.Second
+
+	// BackoffMultiplier is the exponential backoff multiplier
+	BackoffMultiplier = 2.0
+)
+
 // EventHandler is called for each event
 type EventHandler func(ctx context.Context, event *types.UAEvent) error
 
 // NewEventConsumer creates a new UA event consumer
-func NewEventConsumer(registry *Registry, config UAEventConsumerConfig) *EventConsumer {
+func NewEventConsumer(registry *Registry, cfg config.ControlChannelConfig) *EventConsumer {
+	bufferSize := 1000
+	if cfg.Address == "" {
+		cfg.Address = "/tmp/ua_mma.sock"
+	}
+	if cfg.Transport == "" {
+		cfg.Transport = "grpc_uds"
+	}
+
 	return &EventConsumer{
 		registry:      registry,
-		config:        config,
+		config:        cfg,
 		stopChan:      make(chan struct{}),
+		eventCh:       make(chan *types.UAEvent, bufferSize),
 		eventHandlers: make(map[string]EventHandler),
-		processedSeq:  make(map[string]int64),
+		nodeSequences: make(map[string]uint64),
 	}
+}
+
+// SetPolicyEvaluator sets the policy evaluator for policy update events.
+func (ec *EventConsumer) SetPolicyEvaluator(policy policy_evaluator.PolicyEvaluator) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.policy = policy
 }
 
 // RegisterHandler registers a handler for specific event types
@@ -59,40 +104,274 @@ func (ec *EventConsumer) RegisterHandler(eventType string, handler EventHandler)
 // Start begins consuming events from UA
 func (ec *EventConsumer) Start(ctx context.Context) error {
 	ec.mu.Lock()
+	defer ec.mu.Unlock()
+
 	if ec.running {
-		ec.mu.Unlock()
 		return fmt.Errorf("event consumer already running")
 	}
-	ec.running = true
-	ec.mu.Unlock()
 
 	logger := logging.GetLogger(ctx)
-	logger.Info("starting UA event consumer", "endpoint", ec.config.StreamEndpoint)
+	logger.Info("starting UA event consumer", "transport", ec.config.Transport, "address", ec.config.Address)
 
-	// TODO: Implement gRPC streaming connection to UA
-	// For now, this is a placeholder that demonstrates the structure
+	// Reset stop channel for fresh start
+	ec.stopChan = make(chan struct{})
+
+	ec.running = true
+
+	// Initialize TLS credentials if enabled
+	if ec.config.TLSEnabled {
+		tlsCreds, err := transport.NewTLSCredentials(ec.config)
+		if err != nil {
+			ec.running = false
+			return fmt.Errorf("failed to create TLS credentials: %w", err)
+		}
+		ec.tlsCreds = tlsCreds
+	}
+
+	// Start event stream based on transport type
+	if strings.HasPrefix(ec.config.Address, "file://") {
+		// File-based testing mode
+		path := strings.TrimPrefix(ec.config.Address, "file://")
+		go ec.streamFromFile(ctx, path)
+	} else {
+		// Real gRPC streaming
+		go ec.streamFromGRPC(ctx)
+	}
 
 	// Start event processing loop
 	go ec.processEventLoop(ctx)
 
+	logger.Info("event consumer started")
 	return nil
 }
 
 // Stop stops consuming events
 func (ec *EventConsumer) Stop(ctx context.Context) error {
 	ec.mu.Lock()
+	defer ec.mu.Unlock()
+
 	if !ec.running {
-		ec.mu.Unlock()
 		return fmt.Errorf("event consumer not running")
 	}
+
 	ec.running = false
-	ec.mu.Unlock()
 
 	logger := logging.GetLogger(ctx)
 	logger.Info("stopping UA event consumer")
 
 	close(ec.stopChan)
+
+	// Close gRPC connection if open
+	if ec.grpcConn != nil {
+		if err := ec.grpcConn.Close(); err != nil {
+			logger.Error("failed to close gRPC connection", "error", err)
+		}
+		ec.grpcConn = nil
+	}
+
 	return nil
+}
+
+// streamFromGRPC establishes a gRPC stream to the UA and consumes events.
+// It implements exponential backoff reconnect logic.
+func (ec *EventConsumer) streamFromGRPC(ctx context.Context) {
+	logger := logging.GetLogger(ctx)
+	backoff := InitialReconnectBackoff
+	attempt := 0
+
+	for {
+		select {
+		case <-ec.stopChan:
+			logger.Info("gRPC stream stopped")
+			close(ec.eventCh)
+			return
+		case <-ctx.Done():
+			logger.Info("gRPC stream context cancelled")
+			close(ec.eventCh)
+			return
+		default:
+		}
+
+		attempt++
+		logger.Info("attempting to connect to UA event stream", "attempt", attempt, "address", ec.config.Address)
+
+		// Establish gRPC connection
+		dialOpts := []grpc.DialOption{}
+
+		if ec.config.Transport == "grpc_uds" {
+			// Unix domain socket
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			dialOpts = append(dialOpts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				return net.Dial("unix", addr)
+			}))
+		} else if ec.config.TLSEnabled && ec.tlsCreds != nil {
+			// TCP with TLS
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(ec.tlsCreds.GetTransportCredentials()))
+		} else {
+			// TCP without TLS (insecure)
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}
+
+		conn, err := grpc.DialContext(ctx, ec.config.Address, dialOpts...)
+		if err != nil {
+			logger.Error("failed to dial UA", "error", err, "backoff", backoff)
+			time.Sleep(backoff)
+			backoff = time.Duration(math.Min(float64(backoff)*BackoffMultiplier, float64(MaxReconnectBackoff)))
+			continue
+		}
+
+		ec.mu.Lock()
+		ec.grpcConn = conn
+		ec.mu.Unlock()
+
+		client := pb.NewUAEventStreamServiceClient(conn)
+
+		// Build StreamEventsRequest with last_seen_seq for resumption
+		req := &pb.StreamEventsRequest{
+			LastSeenSeq:     ec.getLastSeenSeq(),
+			EventTypeFilter: []string{}, // Subscribe to all event types
+			BufferSizeHint:  1000,
+		}
+
+		stream, err := client.StreamEvents(ctx, req)
+		if err != nil {
+			logger.Error("failed to start stream", "error", err, "backoff", backoff)
+			conn.Close()
+			time.Sleep(backoff)
+			backoff = time.Duration(math.Min(float64(backoff)*BackoffMultiplier, float64(MaxReconnectBackoff)))
+			continue
+		}
+
+		logger.Info("gRPC event stream connected")
+		backoff = InitialReconnectBackoff // Reset backoff on successful connection
+
+		// Consume stream
+		streamErr := ec.consumeStream(ctx, stream)
+		conn.Close()
+
+		if streamErr != nil {
+			if status.Code(streamErr) == codes.Canceled {
+				logger.Info("stream cancelled")
+				close(ec.eventCh)
+				return
+			}
+			logger.Error("stream error", "error", streamErr, "backoff", backoff)
+		}
+
+		// Exponential backoff before reconnect
+		time.Sleep(backoff)
+		backoff = time.Duration(math.Min(float64(backoff)*BackoffMultiplier, float64(MaxReconnectBackoff)))
+	}
+}
+
+// consumeStream reads events from the gRPC stream and pushes them to eventCh.
+func (ec *EventConsumer) consumeStream(ctx context.Context, stream pb.UAEventStreamService_StreamEventsClient) error {
+	logger := logging.GetLogger(ctx)
+
+	for {
+		select {
+		case <-ec.stopChan:
+			return status.Error(codes.Canceled, "stopped")
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		pbEvent, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+
+		logger.Info("received event from UA", "event_type", pbEvent.EventType, "event_id", pbEvent.EventId, "seq", pbEvent.Seq)
+
+		// Convert pb.UAEvent to types.UAEvent
+		event, err := ec.convertPBEvent(pbEvent)
+		if err != nil {
+			logger.Error("failed to convert event", "error", err, "event_id", pbEvent.EventId)
+			continue
+		}
+
+		// Push to event channel (sequence will be updated after processing in HandleEvent)
+		select {
+		case ec.eventCh <- event:
+		case <-ec.stopChan:
+			return status.Error(codes.Canceled, "stopped")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// convertPBEvent converts a protobuf UAEvent to types.UAEvent.
+func (ec *EventConsumer) convertPBEvent(pbEvent *pb.UAEvent) (*types.UAEvent, error) {
+	// Convert protobuf.Struct to map[string]interface{}
+	payload := pbEvent.Payload.AsMap()
+
+	event := &types.UAEvent{
+		EventID:   pbEvent.EventId,
+		EventType: pbEvent.EventType,
+		EmittedAt: pbEvent.EmittedAt.AsTime(),
+		ClusterID: pbEvent.ClusterId,
+		NodeID:    pbEvent.NodeId,
+		Seq:       pbEvent.Seq,
+		Payload:   payload,
+		Signature: pbEvent.Signature,
+	}
+
+	if pbEvent.EntityRef != nil {
+		event.EntityRef = &types.EntityRef{
+			Kind: pbEvent.EntityRef.Kind,
+			ID:   pbEvent.EntityRef.Id,
+		}
+	}
+
+	return event, nil
+}
+
+// getLastSeenSeq returns a copy of the node sequence map for resumption.
+func (ec *EventConsumer) getLastSeenSeq() map[string]uint64 {
+	ec.mu.RLock()
+	defer ec.mu.RUnlock()
+
+	m := make(map[string]uint64, len(ec.nodeSequences))
+	for k, v := range ec.nodeSequences {
+		m[k] = v
+	}
+	return m
+}
+
+// streamFromFile reads UA events from a JSON file and pushes them into the event channel.
+func (ec *EventConsumer) streamFromFile(ctx context.Context, path string) {
+	logger := logging.GetLogger(ctx)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logger.Error("failed to read event stream file", "error", err, "path", path)
+		close(ec.eventCh)
+		return
+	}
+
+	var events []*types.UAEvent
+	if err := json.Unmarshal(data, &events); err != nil {
+		logger.Error("failed to parse event stream file", "error", err, "path", path)
+		close(ec.eventCh)
+		return
+	}
+
+	for _, event := range events {
+		select {
+		case <-ec.stopChan:
+			logger.Info("event stream stopped")
+			close(ec.eventCh)
+			return
+		case <-ctx.Done():
+			logger.Info("event stream context cancelled")
+			close(ec.eventCh)
+			return
+		case ec.eventCh <- event:
+		}
+	}
+
+	close(ec.eventCh)
 }
 
 // IsRunning returns whether the consumer is running
@@ -106,8 +385,6 @@ func (ec *EventConsumer) IsRunning() bool {
 func (ec *EventConsumer) processEventLoop(ctx context.Context) {
 	logger := logging.GetLogger(ctx)
 
-	// TODO: When gRPC stream is implemented, listen on it here
-	// For now this is placeholder structure
 	for {
 		select {
 		case <-ec.stopChan:
@@ -116,8 +393,14 @@ func (ec *EventConsumer) processEventLoop(ctx context.Context) {
 		case <-ctx.Done():
 			logger.Debug("event consumer context cancelled")
 			return
-		default:
-			time.Sleep(100 * time.Millisecond)
+		case event, ok := <-ec.eventCh:
+			if !ok {
+				logger.Debug("event stream closed")
+				return
+			}
+			if err := ec.HandleEvent(ctx, event); err != nil {
+				logger.Error("failed to handle event", "error", err, "event_type", event.EventType)
+			}
 		}
 	}
 }
@@ -127,12 +410,19 @@ func (ec *EventConsumer) HandleEvent(ctx context.Context, event *types.UAEvent) 
 	logger := logging.GetLogger(ctx)
 
 	// Check sequence to ensure ordering per node
-	lastSeq := ec.processedSeq[event.NodeID]
+	ec.mu.RLock()
+	lastSeq := ec.nodeSequences[event.NodeID]
+	ec.mu.RUnlock()
+
 	if event.Seq <= lastSeq && lastSeq > 0 {
 		logger.Debug("skipping out-of-order event", "event_type", event.EventType, "node", event.NodeID, "seq", event.Seq, "last_seq", lastSeq)
 		return nil
 	}
-	ec.processedSeq[event.NodeID] = event.Seq
+
+	// Update sequence tracking for this node
+	ec.mu.Lock()
+	ec.nodeSequences[event.NodeID] = event.Seq
+	ec.mu.Unlock()
 
 	logger = logger.With(
 		"event_type", event.EventType,
@@ -328,12 +618,22 @@ func (ec *EventConsumer) handleServiceStarted(ctx context.Context, event *types.
 	// Add providers for each capability
 	for _, capRef := range payload.CapabilitiesProvided {
 		for _, endpoint := range payload.Endpoints {
+			trustTier := types.TrustTierLocal
+			if payload.Labels != nil {
+				if tier, ok := payload.Labels["trust_tier"]; ok {
+					switch types.TrustTier(tier) {
+					case types.TrustTierLocal, types.TrustTierExperimental, types.TrustTierCommunity, types.TrustTierCertified, types.TrustTierOfficial:
+						trustTier = types.TrustTier(tier)
+					}
+				}
+			}
+
 			provider := &types.Provider{
 				ServiceID:       payload.ServiceID,
 				ServiceIdentity: payload.ServiceIdentity,
 				NodeID:          payload.NodeID,
 				CapabilityID:    capRef.CapabilityID,
-				TrustTier:       types.TrustTierOfficial, // TODO: Get from metadata
+				TrustTier:       trustTier,
 				Endpoint:        endpoint,
 				Labels:          payload.Labels,
 				Available:       true,
@@ -398,7 +698,18 @@ func (ec *EventConsumer) handleCapabilityCacheSnapshot(ctx context.Context, even
 	}
 
 	logger.Info("capability cache snapshot updated", "version", payload.CacheVersion, "digest", payload.SchemaIndexDigest)
-	// TODO: Fetch actual capability definitions from UA using the ref
+	if payload.SignedSnapshotRef != "" {
+		cache := &types.CapabilityCache{}
+		if err := loadJSONFromRef(payload.SignedSnapshotRef, cache); err != nil {
+			logger.Error("failed to load capability cache from ref", "error", err, "ref", payload.SignedSnapshotRef)
+			return err
+		}
+		cache.Version = payload.CacheVersion
+		cache.SchemaIndexDigest = payload.SchemaIndexDigest
+		cache.VerifiedAt = payload.VerifiedAt
+		ec.registry.ReplaceCapabilityCache(cache)
+		logger.Info("capability cache loaded", "capabilities", len(cache.Capabilities))
+	}
 	return nil
 }
 
@@ -412,7 +723,18 @@ func (ec *EventConsumer) handleCapabilityCacheDelta(ctx context.Context, event *
 	}
 
 	logger.Info("capability cache delta updated", "version", payload.CacheVersion)
-	// TODO: Fetch delta from UA and apply to capabilities
+	if payload.DeltaRef != "" {
+		cache := &types.CapabilityCache{}
+		if err := loadJSONFromRef(payload.DeltaRef, cache); err != nil {
+			logger.Error("failed to load capability cache delta from ref", "error", err, "ref", payload.DeltaRef)
+			return err
+		}
+		cache.Version = payload.CacheVersion
+		cache.SchemaIndexDigest = payload.SchemaIndexDigest
+		cache.VerifiedAt = payload.VerifiedAt
+		ec.registry.ReplaceCapabilityCache(cache)
+		logger.Info("capability cache delta applied", "capabilities", len(cache.Capabilities))
+	}
 	return nil
 }
 
@@ -426,7 +748,9 @@ func (ec *EventConsumer) handleIdentityTrustRoots(ctx context.Context, event *ty
 	}
 
 	logger.Info("identity trust roots updated", "rotation_id", payload.RotationID, "valid_to", payload.ValidTo)
-	// TODO: Update TLS trust roots for verification
+	ec.mu.Lock()
+	ec.trustRoots = payload
+	ec.mu.Unlock()
 	return nil
 }
 
@@ -440,13 +764,45 @@ func (ec *EventConsumer) handleMeshPolicyUpdated(ctx context.Context, event *typ
 	}
 
 	logger.Info("mesh policy updated", "version", payload.PolicyVersion, "effective_at", payload.EffectiveAt)
-	// TODO: Notify policy evaluator of policy update
+
+	if payload.PolicyRef != "" {
+		policy := &types.MeshPolicy{}
+		if err := loadJSONFromRef(payload.PolicyRef, policy); err != nil {
+			logger.Error("failed to load policy from ref", "error", err, "ref", payload.PolicyRef)
+			return err
+		}
+
+		ec.mu.RLock()
+		policyEval := ec.policy
+		ec.mu.RUnlock()
+
+		if policyEval == nil {
+			logger.Warn("policy update received but no evaluator set")
+			return nil
+		}
+
+		if err := policyEval.UpdatePolicy(ctx, policy); err != nil {
+			logger.Error("failed to update policy", "error", err)
+			return err
+		}
+		logger.Info("policy evaluator updated", "version", policy.Version)
+	}
 	return nil
 }
 
 // Helper to unmarshal payloads from JSON
 func unmarshalPayload(payload interface{}, target interface{}) error {
 	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+// loadJSONFromRef loads JSON from a file reference (file:// or path).
+func loadJSONFromRef(ref string, target interface{}) error {
+	path := strings.TrimPrefix(ref, "file://")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
