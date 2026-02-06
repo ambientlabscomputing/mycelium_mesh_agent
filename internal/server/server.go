@@ -12,6 +12,7 @@ import (
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/telemetry"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/pkg/version"
 	"github.com/gin-gonic/gin"
 )
 
@@ -75,6 +76,9 @@ func (s *Server) setupRoutes() {
 	// API v1 routes
 	api := s.router.Group("/api/v1")
 
+	// Version endpoint
+	api.GET("/version", s.handleVersion)
+
 	// Binding endpoints
 	api.POST("/bindings/request", s.handleBindingRequest)
 	api.GET("/bindings/:binding_id", s.handleGetBinding)
@@ -98,6 +102,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",
 	})
+}
+
+// handleVersion returns version information.
+func (s *Server) handleVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, version.GetInfo())
 }
 
 // handleBindingRequest handles POST /api/v1/bindings/request.
@@ -285,7 +294,7 @@ func (s *Server) handleIntrospectMesh(c *gin.Context) {
 			"status": string(meshState),
 		},
 		"buffers": gin.H{
-			"telemetry_bytes":    s.flusher.BufferSizeBytes(),
+			"telemetry_bytes":     s.flusher.BufferSizeBytes(),
 			"audit_events_queued": s.flusher.EventCount(),
 		},
 	}
