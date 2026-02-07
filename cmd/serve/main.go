@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 // Launcher initializes and manages MMA subsystems
 type Launcher struct {
 	config          *config.Store
+	httpPort        int
 	registry        *discovery.Registry
 	eventConsumer   *discovery.EventConsumer
 	policyEvaluator policy_evaluator.PolicyEvaluator
@@ -41,7 +43,8 @@ type LauncherConfig struct {
 // NewLauncher creates a new launcher
 func NewLauncher(cfg LauncherConfig) *Launcher {
 	return &Launcher{
-		config: cfg.ConfigStore,
+		config:   cfg.ConfigStore,
+		httpPort: cfg.HTTPPort,
 	}
 }
 
@@ -114,7 +117,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		l.flusher,
 		l.policyEvaluator,
 		l.config,
-		8080,
+		l.httpPort,
 	)
 
 	if err := apiServer.Start(ctx); err != nil {
@@ -294,10 +297,18 @@ func Serve() error {
 		"control_channel", cfg.ControlChannelConfig.Transport,
 	)
 
+	// Determine HTTP port (default 10080, override with MMA_HTTP_PORT)
+	httpPort := 10080
+	if portStr := os.Getenv("MMA_HTTP_PORT"); portStr != "" {
+		if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
+			httpPort = parsedPort
+		}
+	}
+
 	// Create launcher
 	launcher := NewLauncher(LauncherConfig{
 		LocalNodeID: os.Getenv("NODE_ID"),
-		HTTPPort:    8080,
+		HTTPPort:    httpPort,
 		LogLevel:    cfg.TelemetryDefaults.Level,
 		ConfigStore: cfgStore,
 	})
