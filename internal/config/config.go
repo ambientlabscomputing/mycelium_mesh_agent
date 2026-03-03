@@ -41,6 +41,9 @@ type MMAConfig struct {
 	// RuntimeConfig specifies mesh runtime behavior
 	RuntimeConfig RuntimeConfig `yaml:"runtime_config" json:"runtime_config"`
 
+	// HyphaeConfig specifies Hyphae exposure provider configuration
+	HyphaeConfig HyphaeConfig `yaml:"hyphae_config" json:"hyphae_config"`
+
 	// AppliedAt records when this config was applied
 	AppliedAt time.Time `json:"applied_at"`
 }
@@ -150,6 +153,27 @@ type RuntimeConfig struct {
 	MaxBindingDecisionLatencyMs int `yaml:"max_binding_decision_latency_ms" json:"max_binding_decision_latency_ms"`
 }
 
+// HyphaeConfig specifies Hyphae exposure provider configuration
+type HyphaeConfig struct {
+	// Enabled whether the Hyphae provider is active
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// TunnelAddr is the address of the Hyphae tunnel server
+	TunnelAddr string `yaml:"tunnel_addr" json:"tunnel_addr"`
+
+	// CACertPath is the path to the platform CA certificate for mTLS
+	CACertPath string `yaml:"ca_cert_path" json:"ca_cert_path"`
+
+	// ClientCertPath is the path to the MMA client certificate for mTLS
+	ClientCertPath string `yaml:"client_cert_path" json:"client_cert_path"`
+
+	// ClientKeyPath is the path to the MMA client private key for mTLS
+	ClientKeyPath string `yaml:"client_key_path" json:"client_key_path"`
+
+	// AutoReconnect whether to automatically reconnect on tunnel loss
+	AutoReconnect bool `yaml:"auto_reconnect" json:"auto_reconnect"`
+}
+
 // DefaultMMAConfig returns a configuration with sensible defaults
 func DefaultMMAConfig() *MMAConfig {
 	return &MMAConfig{
@@ -193,6 +217,10 @@ func DefaultMMAConfig() *MMAConfig {
 			MaxConcurrentBindings:       1000,
 			EnableQUIC:                  true,
 			MaxBindingDecisionLatencyMs: 10,
+		},
+		HyphaeConfig: HyphaeConfig{
+			Enabled:       false, // disabled by default, enabled via config update from UA
+			AutoReconnect: true,
 		},
 	}
 }

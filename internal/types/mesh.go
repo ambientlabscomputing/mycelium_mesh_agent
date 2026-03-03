@@ -159,6 +159,34 @@ type ConsentStateUpdatedPayload struct {
 	Version      string                 `json:"version"`
 }
 
+// ===== Exposure Events =====
+
+type ExposureBindRequestedPayload struct {
+	ExposureID string `json:"exposure_id"`
+	LeaseID    string `json:"lease_id"`
+	Hostname   string `json:"hostname"`
+	TargetPort int    `json:"target_port"`
+	LocalAddr  string `json:"local_addr"` // resolved by agent from deployment service ports
+}
+
+type ExposureBindCompletedPayload struct {
+	ExposureID string `json:"exposure_id"`
+	LeaseID    string `json:"lease_id"`
+	Status     string `json:"status"` // "bound" or "error"
+	PublicURL  string `json:"public_url,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type ExposureUnbindRequestedPayload struct {
+	ExposureID string `json:"exposure_id"`
+	LeaseID    string `json:"lease_id"`
+}
+
+type ExposureUnbindCompletedPayload struct {
+	ExposureID string `json:"exposure_id"`
+	Error      string `json:"error,omitempty"`
+}
+
 // ===== Event Type Constants =====
 
 const (
@@ -177,6 +205,10 @@ const (
 	EventCapabilityCacheDeltaUpdated    = "capability_cache.delta.updated"
 	EventMeshPolicyUpdated              = "mesh_policy.updated"
 	EventConsentStateUpdated            = "consent_state.updated"
+	EventExposureBindRequested          = "exposure.bind.requested"
+	EventExposureBindCompleted          = "exposure.bind.completed"
+	EventExposureUnbindRequested        = "exposure.unbind.requested"
+	EventExposureUnbindCompleted        = "exposure.unbind.completed"
 )
 
 // ===== Binding Types =====

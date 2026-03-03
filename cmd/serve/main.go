@@ -11,6 +11,8 @@ import (
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/binding_engine"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/config"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/discovery"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/exposure"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/kernel"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/logging"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/server"
@@ -20,16 +22,17 @@ import (
 
 // Launcher initializes and manages MMA subsystems
 type Launcher struct {
-	config          *config.Store
-	httpPort        int
-	registry        *discovery.Registry
-	eventConsumer   *discovery.EventConsumer
-	policyEvaluator policy_evaluator.PolicyEvaluator
-	bindingEngine   binding_engine.BindingEngine
-	telemetryBuffer *telemetry.Buffer
-	collector       *telemetry.Collector
-	flusher         *telemetry.Flusher
-	apiServer       *server.Server
+	config           *config.Store
+	httpPort         int
+	registry         *discovery.Registry
+	eventConsumer    *discovery.EventConsumer
+	policyEvaluator  policy_evaluator.PolicyEvaluator
+	bindingEngine    binding_engine.BindingEngine
+	telemetryBuffer  *telemetry.Buffer
+	collector        *telemetry.Collector
+	flusher          *telemetry.Flusher
+	apiServer        *server.Server
+	exposureProvider exposure.Provider
 }
 
 // LauncherConfig specifies launcher configuration
@@ -87,6 +90,36 @@ func (l *Launcher) Start(ctx context.Context) error {
 
 	// Wire policy evaluator into event consumer for policy updates
 	l.eventConsumer.SetPolicyEvaluator(l.policyEvaluator)
+
+	// Initialize exposure provider (Hyphae tunnel management)
+	hyphaeConfig := l.config.GetHyphaeConfig()
+	if hyphaeConfig.Enabled {
+		provider, err := exposure.NewHyphaeProvider(hyphaeConfig, logger)
+		if err != nil {
+			logger.Error("failed to create Hyphae exposure provider", "error", err)
+			return err
+		}
+		l.exposureProvider = provider
+		logger.Info("Hyphae exposure provider initialized")
+
+		// Create kernel emitter so MMA can report bind/unbind completion back to the platform
+		kernelEmitter, emitErr := kernel.NewKernelEmitter("", logger)
+		if emitErr != nil {
+			logger.Warn("could not connect to kernel socket; exposure completion events will not be emitted", "error", emitErr)
+			kernelEmitter = nil
+		} else {
+			logger.Info("kernel emitter connected")
+		}
+
+		// Register exposure event handlers
+		if err := exposure.RegisterHandlers(l.eventConsumer, provider, kernelEmitter); err != nil {
+			logger.Error("failed to register exposure handlers", "error", err)
+			return err
+		}
+		logger.Info("exposure event handlers registered")
+	} else {
+		logger.Warn("Hyphae exposure provider disabled in configuration")
+	}
 
 	// Initialize telemetry (before binding engine so it can emit audit events)
 	telemetryConfig := l.config.GetTelemetryConfig()
@@ -147,6 +180,13 @@ func (l *Launcher) Stop(ctx context.Context) error {
 	if l.bindingEngine != nil {
 		if err := l.bindingEngine.Stop(ctx); err != nil {
 			logger.Error("failed to stop binding engine", "error", err)
+		}
+	}
+
+	// Close exposure provider
+	if l.exposureProvider != nil {
+		if err := l.exposureProvider.Close(); err != nil {
+			logger.Error("failed to close exposure provider", "error", err)
 		}
 	}
 

@@ -105,6 +105,13 @@ func (s *Store) GetRuntimeConfig() RuntimeConfig {
 	return s.config.RuntimeConfig
 }
 
+// GetHyphaeConfig returns the Hyphae exposure provider configuration
+func (s *Store) GetHyphaeConfig() HyphaeConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.HyphaeConfig
+}
+
 // GetConfigVersion returns the current config version
 func (s *Store) GetConfigVersion() string {
 	s.mu.RLock()
