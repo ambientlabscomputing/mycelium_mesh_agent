@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -91,10 +94,63 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// Wire policy evaluator into event consumer for policy updates
 	l.eventConsumer.SetPolicyEvaluator(l.policyEvaluator)
 
-	// Initialize exposure provider (Hyphae tunnel management)
+	// Bootstrap MMA certificate from kernel (if Hyphae is enabled)
+	// This happens before HyphaeProvider is initialized so we can pass cert bytes directly
 	hyphaeConfig := l.config.GetHyphaeConfig()
+	var tunneClientTLSCfg *tls.Config
+
 	if hyphaeConfig.Enabled {
-		provider, err := exposure.NewHyphaeProvider(hyphaeConfig, logger)
+		logger.Info("bootstrapping MMA certificate from kernel")
+		identityClient, err := kernel.NewIdentityClient("", logger)
+		if err != nil {
+			logger.Warn("could not connect to kernel for cert bootstrap; will fall back to config file paths", "error", err)
+		} else {
+			// Request certificate from the kernel
+			certPEM, keyPEM, expiresAt, err := identityClient.IssueLocalCertificate(
+				ctx,
+				"mma",       // component name
+				nil,         // no specific DNS names (inherits from server_id)
+				nil,         // no specific IP addresses
+				uint32(365), // 365-day validity
+			)
+			if err != nil {
+				logger.Warn("failed to bootstrap cert from kernel; will fall back to config file paths", "error", err)
+			} else {
+				logger.Info("certificate bootstrapped successfully", "expires_at", expiresAt)
+
+				// Build a *tls.Config from the cert bytes for TunnelClient
+				cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+				if err != nil {
+					logger.Warn("failed to parse bootstrapped cert; will fall back to config file paths", "error", err)
+				} else {
+					tunneClientTLSCfg = &tls.Config{
+						Certificates: []tls.Certificate{cert},
+						MinVersion:   tls.VersionTLS12,
+					}
+
+					// Also fetch the CA cert from the kernel's GetNodeIdentity
+					nodeIdentity, err := identityClient.GetNodeIdentity(ctx)
+					if err != nil {
+						logger.Warn("could not fetch CA cert from node identity", "error", err)
+					} else if len(nodeIdentity.CertificateChainPem) > 0 {
+						chainPEM := []byte(strings.Join(nodeIdentity.CertificateChainPem, "\n"))
+						pool := x509.NewCertPool()
+						if pool.AppendCertsFromPEM(chainPEM) {
+							if tunneClientTLSCfg.RootCAs == nil {
+								tunneClientTLSCfg.RootCAs = pool
+							}
+							logger.Info("CA cert loaded from node identity")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Initialize exposure provider (Hyphae tunnel management)
+	if hyphaeConfig.Enabled {
+		// Create HyphaeProvider with optional bootstrapped TLS config
+		provider, err := exposure.NewHyphaeProviderWithTLS(hyphaeConfig, tunneClientTLSCfg, logger)
 		if err != nil {
 			logger.Error("failed to create Hyphae exposure provider", "error", err)
 			return err

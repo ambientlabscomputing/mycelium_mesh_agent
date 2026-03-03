@@ -2,6 +2,7 @@ package exposure
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -36,8 +37,15 @@ type activeTunnel struct {
 	forwardDone chan error // closed when Forward() exits
 }
 
-// NewHyphaeProvider creates a new Hyphae exposure provider.
+// NewHyphaeProvider creates a new Hyphae exposure provider with file-based certs.
 func NewHyphaeProvider(cfg config.HyphaeConfig, logger *slog.Logger) (*HyphaeProvider, error) {
+	return NewHyphaeProviderWithTLS(cfg, nil, logger)
+}
+
+// NewHyphaeProviderWithTLS creates a new Hyphae exposure provider with optional pre-built TLS config.
+// If tlsCfg is provided, it will be used instead of loading cert/key files from disk.
+// This is useful when certificates are bootstrapped dynamically from the kernel.
+func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, logger *slog.Logger) (*HyphaeProvider, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -51,6 +59,7 @@ func NewHyphaeProvider(cfg config.HyphaeConfig, logger *slog.Logger) (*HyphaePro
 		ClientCertPath: cfg.ClientCertPath,
 		ClientKeyPath:  cfg.ClientKeyPath,
 		AutoReconnect:  cfg.AutoReconnect,
+		TLSConfig:      tlsCfg, // Use pre-built TLS config if provided
 	}
 
 	tunnelClient, err := sdk.NewTunnelClient(tunnelCfg)
