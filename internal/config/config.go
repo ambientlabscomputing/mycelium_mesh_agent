@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"time"
 
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/types"
@@ -174,9 +175,16 @@ type HyphaeConfig struct {
 	AutoReconnect bool `yaml:"auto_reconnect" json:"auto_reconnect"`
 }
 
-// DefaultMMAConfig returns a configuration with sensible defaults
+// DefaultMMAConfig returns a configuration with sensible defaults.
+// Hyphae settings can be overridden with env vars for local dev:
+//
+//	HYPHAE_ENABLED=true
+//	HYPHAE_TUNNEL_ADDR=localhost:9090
+//	HYPHAE_CA_CERT_PATH=/path/to/ca.crt
+//	HYPHAE_CLIENT_CERT_PATH=/path/to/client.crt
+//	HYPHAE_CLIENT_KEY_PATH=/path/to/client.key
 func DefaultMMAConfig() *MMAConfig {
-	return &MMAConfig{
+	cfg := &MMAConfig{
 		ConfigVersion:    "1.0.0",
 		MeshMode:         "ambient",
 		LocalityDefaults: string(types.LocalityLANPreferred),
@@ -223,4 +231,23 @@ func DefaultMMAConfig() *MMAConfig {
 			AutoReconnect: true,
 		},
 	}
+
+	// Allow environment variable overrides for Hyphae config (dev mode support)
+	if os.Getenv("HYPHAE_ENABLED") == "true" {
+		cfg.HyphaeConfig.Enabled = true
+	}
+	if v := os.Getenv("HYPHAE_TUNNEL_ADDR"); v != "" {
+		cfg.HyphaeConfig.TunnelAddr = v
+	}
+	if v := os.Getenv("HYPHAE_CA_CERT_PATH"); v != "" {
+		cfg.HyphaeConfig.CACertPath = v
+	}
+	if v := os.Getenv("HYPHAE_CLIENT_CERT_PATH"); v != "" {
+		cfg.HyphaeConfig.ClientCertPath = v
+	}
+	if v := os.Getenv("HYPHAE_CLIENT_KEY_PATH"); v != "" {
+		cfg.HyphaeConfig.ClientKeyPath = v
+	}
+
+	return cfg
 }

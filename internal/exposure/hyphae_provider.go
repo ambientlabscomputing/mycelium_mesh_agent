@@ -100,7 +100,9 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 
 	// Create a context for this specific tunnel
 	tunnelCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// NOTE: Do NOT defer cancel() here — the Forward goroutine must keep running
+	// after Bind returns. The cancel function is stored in activeTunnels and
+	// called by Unbind() when the exposure is torn down.
 
 	// Start forwarding in a goroutine
 	forwardDone := make(chan error, 1)
