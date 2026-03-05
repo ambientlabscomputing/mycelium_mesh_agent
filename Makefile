@@ -22,9 +22,19 @@ help:
 	@echo ""
 
 ## run: Run the mycelium mesh agent
+## Uses the OrbStack VM FQDN from hyphae/devops/.vm-name so it survives VM
+## recreation without certificate changes (tunnel cert is a *.orb.local wildcard).
+HYPHAE_VM_NAME ?= $(shell cat $(CURDIR)/../../hyphae/devops/.vm-name 2>/dev/null)
+HYPHAE_VM_FQDN  = $(HYPHAE_VM_NAME).orb.local
+
 .PHONY: run
 run:
-	go run $(LDFLAGS) ./cmd/serve/main.go
+	HYPHAE_ENABLED=true \
+		HYPHAE_TUNNEL_ADDR=$(HYPHAE_VM_FQDN):9090 \
+		HYPHAE_CA_CERT_PATH=/Users/jose/ambient_labs/underleaf/hyphae/certs/ca.crt \
+		HYPHAE_CLIENT_CERT_PATH=/Users/jose/.underleaf/certs/576018c1-30eb-49f5-a7ec-40117fc9d35a.crt \
+		HYPHAE_CLIENT_KEY_PATH=/Users/jose/.underleaf/certs/576018c1-30eb-49f5-a7ec-40117fc9d35a.key \
+		go run $(LDFLAGS) ./cmd/serve/main.go
 
 ## build: Build the mycelium mesh agent binary for current platform
 .PHONY: build
