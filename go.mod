@@ -3,7 +3,7 @@ module github.com/ambientlabscomputing/mycelium_mesh_agent
 go 1.25.5
 
 require (
-	github.com/ambientlabscomputing/hyphae v0.0.0-20260303060645-bc1651049efe
+	github.com/ambientlabscomputing/hyphae v1.0.0-rc.1
 	github.com/ambientlabscomputing/umc_sdk v0.1.3
 	github.com/gin-gonic/gin v1.11.0
 	github.com/lmittmann/tint v1.1.3
@@ -46,5 +46,3 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
 )
-
-replace github.com/ambientlabscomputing/hyphae => ../../hyphae
