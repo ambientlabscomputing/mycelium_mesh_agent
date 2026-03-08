@@ -13,15 +13,19 @@ import (
 )
 
 // HyphaeProvider implements the Provider interface using Hyphae's tunnel protocol.
+// Each active exposure gets its own dedicated TunnelClient (and thus its own
+// mTLS connection + yamux session). This ensures that binding a second exposure
+// never kills the first one's session.
 type HyphaeProvider struct {
 	cfg    config.HyphaeConfig
 	logger *slog.Logger
 
+	// tunnelCfg is the base SDK config used to create per-exposure clients.
+	// Built once in the constructor; shared read-only across all Bind() calls.
+	tunnelCfg sdk.TunnelClientConfig
+
 	mu            sync.RWMutex
 	activeTunnels map[string]*activeTunnel // exposureID -> tunnel state
-
-	// Client that will be reused across multiple exposures
-	tunnelClient *sdk.TunnelClient
 }
 
 // activeTunnel represents a single active tunnel connection.
@@ -52,27 +56,22 @@ func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, logge
 
 	logger = logger.With("provider", "hyphae")
 
-	// Create the tunnel client that will be reused
+	// Build the base config used for each per-exposure TunnelClient.
+	// We do NOT create a client here — each Bind() creates its own dedicated one.
 	tunnelCfg := sdk.TunnelClientConfig{
 		HyphaeAddr:     cfg.TunnelAddr,
 		CACertPath:     cfg.CACertPath,
 		ClientCertPath: cfg.ClientCertPath,
 		ClientKeyPath:  cfg.ClientKeyPath,
 		AutoReconnect:  cfg.AutoReconnect,
-		TLSConfig:      tlsCfg, // Use pre-built TLS config if provided
-	}
-
-	tunnelClient, err := sdk.NewTunnelClient(tunnelCfg)
-	if err != nil {
-		logger.Error("failed to create tunnel client", "error", err)
-		return nil, fmt.Errorf("failed to create tunnel client: %w", err)
+		TLSConfig:      tlsCfg, // may be nil; SDK loads certs from paths
 	}
 
 	return &HyphaeProvider{
 		cfg:           cfg,
 		logger:        logger,
+		tunnelCfg:     tunnelCfg,
 		activeTunnels: make(map[string]*activeTunnel),
-		tunnelClient:  tunnelClient,
 	}, nil
 }
 
@@ -82,7 +81,8 @@ func (p *HyphaeProvider) Name() string {
 }
 
 // Bind establishes a tunnel for the given exposure.
-// This method blocks until the tunnel is established or an error occurs.
+// A fresh TunnelClient is created per exposure so that binding a new exposure
+// never disrupts an existing one's yamux session.
 func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResult, error) {
 	logger := p.logger.With(
 		"exposure_id", req.ExposureID,
@@ -92,8 +92,16 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		"local_addr", req.LocalAddr,
 	)
 
-	// Connect the tunnel client with the given lease ID
-	if err := p.tunnelClient.Connect(ctx, req.LeaseID); err != nil {
+	// Create a dedicated TunnelClient for this exposure.
+	client, err := sdk.NewTunnelClient(p.tunnelCfg)
+	if err != nil {
+		logger.Error("failed to create tunnel client", "error", err)
+		return nil, fmt.Errorf("failed to create tunnel client: %w", err)
+	}
+
+	// Connect the per-exposure client with the given lease ID.
+	if err := client.Connect(ctx, req.LeaseID); err != nil {
+		client.Close() //nolint:errcheck
 		logger.Error("failed to connect tunnel", "error", err)
 		return nil, fmt.Errorf("failed to connect tunnel: %w", err)
 	}
@@ -105,13 +113,13 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 	// Unbind() when the exposure is torn down.
 	tunnelCtx, cancel := context.WithCancel(context.Background())
 
-	// Start forwarding in a goroutine
+	// Start forwarding in a goroutine.
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- p.tunnelClient.Forward(tunnelCtx, req.LocalAddr)
+		forwardDone <- client.Forward(tunnelCtx, req.LocalAddr)
 	}()
 
-	// Store the active tunnel
+	// Store the active tunnel with its dedicated client.
 	p.mu.Lock()
 	p.activeTunnels[req.ExposureID] = &activeTunnel{
 		exposureID:  req.ExposureID,
@@ -119,14 +127,20 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		hostname:    req.Hostname,
 		localAddr:   req.LocalAddr,
 		status:      "bound",
-		client:      p.tunnelClient,
+		client:      client,
 		ctx:         tunnelCtx,
 		cancel:      cancel,
 		forwardDone: forwardDone,
 	}
 	p.mu.Unlock()
 
-	logger.Info("exposure tunnel bound successfully")
+	logger.Info("exposure tunnel bound successfully",
+		"provider", "hyphae",
+		"lease_id", req.LeaseID,
+		"hostname", req.Hostname,
+		"target_port", req.TargetPort,
+		"local_addr", req.LocalAddr,
+	)
 
 	// Build the public URL
 	publicURL := fmt.Sprintf("https://%s", req.Hostname)
@@ -153,10 +167,14 @@ func (p *HyphaeProvider) Unbind(ctx context.Context, exposureID string) error {
 	delete(p.activeTunnels, exposureID)
 	p.mu.Unlock()
 
-	// Cancel the forwarding context
+	// Cancel the forwarding context and close the per-exposure client.
+	// Closing the client shuts down the yamux session + supervisor goroutine.
 	tunnel.cancel()
+	if err := tunnel.client.Close(); err != nil {
+		logger.Warn("error closing tunnel client", "error", err)
+	}
 
-	// Wait for forwarding to finish with a timeout
+	// Wait for Forward() to exit with a timeout.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -194,16 +212,12 @@ func (p *HyphaeProvider) Close() error {
 	}
 	p.mu.Unlock()
 
-	// Cancel all tunnels
+	// Cancel context and close the dedicated client for each active tunnel.
 	for _, tunnel := range tunnels {
 		tunnel.cancel()
-	}
-
-	// Close the underlying tunnel client
-	if p.tunnelClient != nil {
-		if err := p.tunnelClient.Close(); err != nil {
-			logger.Error("failed to close tunnel client", "error", err)
-			return err
+		if err := tunnel.client.Close(); err != nil {
+			logger.Error("failed to close tunnel client",
+				"exposure_id", tunnel.exposureID, "error", err)
 		}
 	}
 
