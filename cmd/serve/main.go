@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -110,63 +111,49 @@ func (l *Launcher) Start(ctx context.Context) error {
 	}
 
 	if hyphaeConfig.Enabled {
-		// Validate file-based cert paths if set (kernel bootstrap may still succeed even if missing)
-		for envVar, path := range map[string]string{
-			"HYPHAE_CA_CERT_PATH":     hyphaeConfig.CACertPath,
-			"HYPHAE_CLIENT_CERT_PATH": hyphaeConfig.ClientCertPath,
-			"HYPHAE_CLIENT_KEY_PATH":  hyphaeConfig.ClientKeyPath,
-		} {
-			if path != "" {
-				if _, err := os.Stat(path); err != nil {
-					logger.Warn("Hyphae cert file not found; kernel bootstrap will be attempted",
-						"env_var", envVar, "path", path)
-				}
-			}
-		}
-
-		logger.Info("bootstrapping MMA certificate from kernel")
+		logger.Info("bootstrapping MMA certificate from kernel (UA-K → server_api)")
 		identityClient, err := kernel.NewIdentityClient("", logger)
 		if err != nil {
-			logger.Warn("could not connect to kernel for cert bootstrap; will fall back to config file paths", "error", err)
-		} else {
-			// Request certificate from the kernel
-			certPEM, keyPEM, expiresAt, err := identityClient.IssueLocalCertificate(
-				ctx,
-				"mma",       // component name
-				nil,         // no specific DNS names (inherits from server_id)
-				nil,         // no specific IP addresses
-				uint32(365), // 365-day validity
-			)
-			if err != nil {
-				logger.Warn("failed to bootstrap cert from kernel; will fall back to config file paths", "error", err)
-			} else {
-				logger.Info("certificate bootstrapped successfully", "expires_at", expiresAt)
+			logger.Error("could not connect to kernel for cert bootstrap", "error", err)
+			return err
+		}
 
-				// Build a *tls.Config from the cert bytes for TunnelClient
-				cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
-				if err != nil {
-					logger.Warn("failed to parse bootstrapped cert; will fall back to config file paths", "error", err)
-				} else {
-					tunneClientTLSCfg = &tls.Config{
-						Certificates: []tls.Certificate{cert},
-						MinVersion:   tls.VersionTLS12,
-					}
+		// Request certificate from the kernel — UA-K generates a key pair,
+		// sends the CSR to server_api for signing, and returns the signed cert.
+		certPEM, keyPEM, expiresAt, err := identityClient.IssueLocalCertificate(
+			ctx,
+			"mma",       // component name
+			nil,         // no specific DNS names (inherits from server_id)
+			nil,         // no specific IP addresses
+			uint32(365), // 365-day validity
+		)
+		if err != nil {
+			logger.Error("failed to bootstrap cert from kernel", "error", err)
+			return fmt.Errorf("MMA cert bootstrap failed: %w", err)
+		}
+		logger.Info("certificate bootstrapped successfully", "expires_at", expiresAt)
 
-					// Also fetch the CA cert from the kernel's GetNodeIdentity
-					nodeIdentity, err := identityClient.GetNodeIdentity(ctx)
-					if err != nil {
-						logger.Warn("could not fetch CA cert from node identity", "error", err)
-					} else if len(nodeIdentity.CertificateChainPem) > 0 {
-						chainPEM := []byte(strings.Join(nodeIdentity.CertificateChainPem, "\n"))
-						pool := x509.NewCertPool()
-						if pool.AppendCertsFromPEM(chainPEM) {
-							if tunneClientTLSCfg.RootCAs == nil {
-								tunneClientTLSCfg.RootCAs = pool
-							}
-							logger.Info("CA cert loaded from node identity")
-						}
-					}
-				}
+		// Build a *tls.Config from the cert bytes for TunnelClient
+		cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+		if err != nil {
+			logger.Error("failed to parse bootstrapped cert", "error", err)
+			return fmt.Errorf("MMA cert parse failed: %w", err)
+		}
+		tunneClientTLSCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+
+		// Also fetch the CA cert from the kernel's GetNodeIdentity
+		nodeIdentity, err := identityClient.GetNodeIdentity(ctx)
+		if err != nil {
+			logger.Warn("could not fetch CA cert from node identity", "error", err)
+		} else if len(nodeIdentity.CertificateChainPem) > 0 {
+			chainPEM := []byte(strings.Join(nodeIdentity.CertificateChainPem, "\n"))
+			pool := x509.NewCertPool()
+			if pool.AppendCertsFromPEM(chainPEM) {
+				tunneClientTLSCfg.RootCAs = pool
+				logger.Info("CA cert loaded from node identity")
 			}
 		}
 	}
