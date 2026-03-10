@@ -100,6 +100,30 @@ func (l *Launcher) Start(ctx context.Context) error {
 	var tunneClientTLSCfg *tls.Config
 
 	if hyphaeConfig.Enabled {
+		// Validate required fields before attempting to connect — fail fast with a
+		// clear message rather than producing an opaque TLS error at connection time.
+		if hyphaeConfig.TunnelAddr == "" {
+			logger.Error("Hyphae is enabled but HYPHAE_TUNNEL_ADDR is not set — disabling Hyphae",
+				"hint", "set HYPHAE_TUNNEL_ADDR=<host>:<port> or add tunnel_addr to cluster.json config_overrides.hyphae")
+			hyphaeConfig.Enabled = false
+		}
+	}
+
+	if hyphaeConfig.Enabled {
+		// Validate file-based cert paths if set (kernel bootstrap may still succeed even if missing)
+		for envVar, path := range map[string]string{
+			"HYPHAE_CA_CERT_PATH":     hyphaeConfig.CACertPath,
+			"HYPHAE_CLIENT_CERT_PATH": hyphaeConfig.ClientCertPath,
+			"HYPHAE_CLIENT_KEY_PATH":  hyphaeConfig.ClientKeyPath,
+		} {
+			if path != "" {
+				if _, err := os.Stat(path); err != nil {
+					logger.Warn("Hyphae cert file not found; kernel bootstrap will be attempted",
+						"env_var", envVar, "path", path)
+				}
+			}
+		}
+
 		logger.Info("bootstrapping MMA certificate from kernel")
 		identityClient, err := kernel.NewIdentityClient("", logger)
 		if err != nil {
