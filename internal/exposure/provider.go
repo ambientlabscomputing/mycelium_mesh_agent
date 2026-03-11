@@ -19,6 +19,11 @@ type BindRequest struct {
 	Hostname   string
 	TargetPort int
 	LocalAddr  string
+	// TunnelAddr, when non-empty, overrides the provider's static tunnel address
+	// for this specific exposure. Populated from the hyphae_tunnel_addr field in
+	// the exposure.bind.request Spine event so that server_api controls which
+	// Hyphae instance each exposure connects to.
+	TunnelAddr string
 }
 
 type BindResult struct {

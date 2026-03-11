@@ -162,11 +162,12 @@ type ConsentStateUpdatedPayload struct {
 // ===== Exposure Events =====
 
 type ExposureBindRequestedPayload struct {
-	ExposureID string `json:"exposure_id"`
-	LeaseID    string `json:"lease_id"`
-	Hostname   string `json:"hostname"`
-	TargetPort int    `json:"target_port"`
-	LocalAddr  string `json:"local_addr"` // resolved by agent from deployment service ports
+	ExposureID       string `json:"exposure_id"`
+	LeaseID          string `json:"lease_id"`
+	Hostname         string `json:"hostname"`
+	TargetPort       int    `json:"target_port"`
+	LocalAddr        string `json:"local_addr"`         // resolved by agent from deployment service ports
+	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"` // tunnel server addr forwarded from server_api; overrides static agent config
 }
 
 type ExposureBindCompletedPayload struct {

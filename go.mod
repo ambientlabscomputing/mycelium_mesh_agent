@@ -2,6 +2,8 @@ module github.com/ambientlabscomputing/mycelium_mesh_agent
 
 go 1.25.5
 
+replace github.com/ambientlabscomputing/hyphae v1.0.0-rc.1 => ../../hyphae
+
 require (
 	github.com/ambientlabscomputing/hyphae v1.0.0-rc.1
 	github.com/ambientlabscomputing/umc_sdk v0.1.3

@@ -99,6 +99,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// This happens before HyphaeProvider is initialized so we can pass cert bytes directly
 	hyphaeConfig := l.config.GetHyphaeConfig()
 	var tunneClientTLSCfg *tls.Config
+	var caCertRefresher func(context.Context) (*x509.CertPool, error)
 
 	if hyphaeConfig.Enabled {
 		// Validate required fields before attempting to connect — fail fast with a
@@ -123,7 +124,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		const maxBootstrapAttempts = 5
 		bootstrapBackoff := 2 * time.Second
 		var certPEM, keyPEM string
-		var expiresAt time.Time
+		var expiresAt *time.Time
 		for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
 			certPEM, keyPEM, expiresAt, err = identityClient.IssueLocalCertificate(
 				ctx,
@@ -174,12 +175,34 @@ func (l *Launcher) Start(ctx context.Context) error {
 				logger.Info("CA cert loaded from node identity")
 			}
 		}
+
+		// Build a CA refresher closure that re-issues the cert to force the kernel
+		// to re-fetch the CA cert from server_api (used by the SDK on cert rotation).
+		caCertRefresher = func(ctx context.Context) (*x509.CertPool, error) {
+			_, _, _, err := identityClient.IssueLocalCertificate(ctx, "mma", nil, nil, 365)
+			if err != nil {
+				return nil, fmt.Errorf("CA refresh: re-issue failed: %w", err)
+			}
+			identity, err := identityClient.GetNodeIdentity(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("CA refresh: get node identity failed: %w", err)
+			}
+			if len(identity.CertificateChainPem) == 0 {
+				return nil, fmt.Errorf("CA refresh: empty certificate chain")
+			}
+			pool := x509.NewCertPool()
+			chainPEM := []byte(strings.Join(identity.CertificateChainPem, "\n"))
+			if !pool.AppendCertsFromPEM(chainPEM) {
+				return nil, fmt.Errorf("CA refresh: failed to parse CA cert from chain")
+			}
+			return pool, nil
+		}
 	}
 
 	// Initialize exposure provider (Hyphae tunnel management)
 	if hyphaeConfig.Enabled {
-		// Create HyphaeProvider with optional bootstrapped TLS config
-		provider, err := exposure.NewHyphaeProviderWithTLS(hyphaeConfig, tunneClientTLSCfg, logger)
+		// Create HyphaeProvider with optional bootstrapped TLS config and CA refresher
+		provider, err := exposure.NewHyphaeProviderWithTLS(hyphaeConfig, tunneClientTLSCfg, caCertRefresher, logger)
 		if err != nil {
 			logger.Error("failed to create Hyphae exposure provider", "error", err)
 			return err

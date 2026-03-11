@@ -3,6 +3,7 @@ package exposure
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -43,13 +44,14 @@ type activeTunnel struct {
 
 // NewHyphaeProvider creates a new Hyphae exposure provider with file-based certs.
 func NewHyphaeProvider(cfg config.HyphaeConfig, logger *slog.Logger) (*HyphaeProvider, error) {
-	return NewHyphaeProviderWithTLS(cfg, nil, logger)
+	return NewHyphaeProviderWithTLS(cfg, nil, nil, logger)
 }
 
 // NewHyphaeProviderWithTLS creates a new Hyphae exposure provider with optional pre-built TLS config.
 // If tlsCfg is provided, it will be used instead of loading cert/key files from disk.
+// If refresher is provided, it is called on x509 verification errors to fetch a fresh CA pool and retry.
 // This is useful when certificates are bootstrapped dynamically from the kernel.
-func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, logger *slog.Logger) (*HyphaeProvider, error) {
+func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, refresher func(context.Context) (*x509.CertPool, error), logger *slog.Logger) (*HyphaeProvider, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -59,12 +61,13 @@ func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, logge
 	// Build the base config used for each per-exposure TunnelClient.
 	// We do NOT create a client here — each Bind() creates its own dedicated one.
 	tunnelCfg := sdk.TunnelClientConfig{
-		HyphaeAddr:     cfg.TunnelAddr,
-		CACertPath:     cfg.CACertPath,
-		ClientCertPath: cfg.ClientCertPath,
-		ClientKeyPath:  cfg.ClientKeyPath,
-		AutoReconnect:  cfg.AutoReconnect,
-		TLSConfig:      tlsCfg, // may be nil; SDK loads certs from paths
+		HyphaeAddr:      cfg.TunnelAddr,
+		CACertPath:      cfg.CACertPath,
+		ClientCertPath:  cfg.ClientCertPath,
+		ClientKeyPath:   cfg.ClientKeyPath,
+		AutoReconnect:   cfg.AutoReconnect,
+		TLSConfig:       tlsCfg,    // may be nil; SDK loads certs from paths
+		CACertRefresher: refresher, // may be nil; enables self-healing on cert rotation
 	}
 
 	return &HyphaeProvider{
@@ -92,8 +95,19 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		"local_addr", req.LocalAddr,
 	)
 
+	// Build the per-exposure SDK config, allowing server_api to override the tunnel
+	// address on a per-exposure basis via the hyphae_tunnel_addr event field.
+	exposureCfg := p.tunnelCfg
+	if req.TunnelAddr != "" && req.TunnelAddr != exposureCfg.HyphaeAddr {
+		exposureCfg.HyphaeAddr = req.TunnelAddr
+		logger.Info("using per-exposure Hyphae tunnel addr",
+			"addr", req.TunnelAddr,
+			"default_addr", p.tunnelCfg.HyphaeAddr,
+		)
+	}
+
 	// Create a dedicated TunnelClient for this exposure.
-	client, err := sdk.NewTunnelClient(p.tunnelCfg)
+	client, err := sdk.NewTunnelClient(exposureCfg)
 	if err != nil {
 		logger.Error("failed to create tunnel client", "error", err)
 		return nil, fmt.Errorf("failed to create tunnel client: %w", err)

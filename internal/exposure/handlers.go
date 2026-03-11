@@ -62,6 +62,7 @@ func handleExposureBindRequested(ctx context.Context, provider Provider, emitter
 		Hostname:   payload.Hostname,
 		TargetPort: int(payload.TargetPort),
 		LocalAddr:  payload.LocalAddr,
+		TunnelAddr: payload.HyphaeTunnelAddr,
 	}
 
 	// Call provider to establish tunnel
