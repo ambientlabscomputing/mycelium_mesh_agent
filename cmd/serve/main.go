@@ -118,18 +118,36 @@ func (l *Launcher) Start(ctx context.Context) error {
 			return err
 		}
 
-		// Request certificate from the kernel — UA-K generates a key pair,
-		// sends the CSR to server_api for signing, and returns the signed cert.
-		certPEM, keyPEM, expiresAt, err := identityClient.IssueLocalCertificate(
-			ctx,
-			"mma",       // component name
-			nil,         // no specific DNS names (inherits from server_id)
-			nil,         // no specific IP addresses
-			uint32(365), // 365-day validity
-		)
-		if err != nil {
-			logger.Error("failed to bootstrap cert from kernel", "error", err)
-			return fmt.Errorf("MMA cert bootstrap failed: %w", err)
+		// Request certificate from the kernel with retry + backoff.
+		// The kernel or server_api may not be ready immediately at MMA startup.
+		const maxBootstrapAttempts = 5
+		bootstrapBackoff := 2 * time.Second
+		var certPEM, keyPEM string
+		var expiresAt time.Time
+		for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
+			certPEM, keyPEM, expiresAt, err = identityClient.IssueLocalCertificate(
+				ctx,
+				"mma",       // component name
+				nil,         // no specific DNS names (inherits from server_id)
+				nil,         // no specific IP addresses
+				uint32(365), // 365-day validity
+			)
+			if err == nil {
+				break
+			}
+			if attempt == maxBootstrapAttempts {
+				logger.Error("MMA cert bootstrap failed after all retries — Hyphae tunnel disabled",
+					"attempts", maxBootstrapAttempts, "error", err)
+				return fmt.Errorf("MMA cert bootstrap failed: %w", err)
+			}
+			logger.Warn("cert bootstrap attempt failed, retrying",
+				"attempt", attempt, "max", maxBootstrapAttempts, "backoff", bootstrapBackoff, "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(bootstrapBackoff):
+			}
+			bootstrapBackoff *= 2 // exponential backoff
 		}
 		logger.Info("certificate bootstrapped successfully", "expires_at", expiresAt)
 

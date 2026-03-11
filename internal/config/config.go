@@ -239,15 +239,9 @@ func DefaultMMAConfig() *MMAConfig {
 	if v := os.Getenv("HYPHAE_TUNNEL_ADDR"); v != "" {
 		cfg.HyphaeConfig.TunnelAddr = v
 	}
-	if v := os.Getenv("HYPHAE_CA_CERT_PATH"); v != "" {
-		cfg.HyphaeConfig.CACertPath = v
-	}
-	if v := os.Getenv("HYPHAE_CLIENT_CERT_PATH"); v != "" {
-		cfg.HyphaeConfig.ClientCertPath = v
-	}
-	if v := os.Getenv("HYPHAE_CLIENT_KEY_PATH"); v != "" {
-		cfg.HyphaeConfig.ClientKeyPath = v
-	}
+	// Note: HYPHAE_CA_CERT_PATH / HYPHAE_CLIENT_CERT_PATH / HYPHAE_CLIENT_KEY_PATH are
+	// intentionally not read here. MMA obtains its TLS identity via the kernel cert-bootstrap
+	// path (IssueLocalCertificate → server_api CSR endpoint), not from pre-staged files.
 
 	return cfg
 }
