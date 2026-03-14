@@ -86,6 +86,9 @@ func (p *HyphaeProvider) Name() string {
 // Bind establishes a tunnel for the given exposure.
 // A fresh TunnelClient is created per exposure so that binding a new exposure
 // never disrupts an existing one's yamux session.
+//
+// Bind is idempotent: if a tunnel already exists for the given exposure ID, it
+// is torn down first to avoid leaking supervisors and creating a reconnect storm.
 func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResult, error) {
 	logger := p.logger.With(
 		"exposure_id", req.ExposureID,
@@ -94,6 +97,27 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		"target_port", req.TargetPort,
 		"local_addr", req.LocalAddr,
 	)
+
+	// Tear down any existing tunnel for this exposure before creating a new one.
+	// Without this, duplicate bind events (e.g. server_api double-publish or
+	// gRPC stream replay) leak TunnelClients whose supervisors compete for the
+	// same lease, creating an infinite reconnect storm on the hyphae server.
+	p.mu.RLock()
+	existing, alreadyBound := p.activeTunnels[req.ExposureID]
+	p.mu.RUnlock()
+	if alreadyBound {
+		logger.Warn("exposure already bound, tearing down stale tunnel before rebind",
+			"old_lease_id", existing.leaseID,
+			"old_hostname", existing.hostname,
+		)
+		existing.cancel()
+		if err := existing.client.Close(); err != nil {
+			logger.Warn("error closing stale tunnel client during rebind", "error", err)
+		}
+		p.mu.Lock()
+		delete(p.activeTunnels, req.ExposureID)
+		p.mu.Unlock()
+	}
 
 	// Build the per-exposure SDK config, allowing server_api to override the tunnel
 	// address on a per-exposure basis via the hyphae_tunnel_addr event field.
