@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,15 @@ func (ec *EventConsumer) RegisterHandler(eventType string, handler EventHandler)
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
 	ec.eventHandlers[eventType] = handler
+	if logger := logging.GetLogger(context.Background()); logger != nil {
+		logger.Info(
+			"registered UA event handler",
+			"consumer_id", ec.consumerID(),
+			"event_type", eventType,
+			"handler_count", len(ec.eventHandlers),
+			"handler_types", ec.handlerTypesLocked(),
+		)
+	}
 }
 
 // Start begins consuming events from UA
@@ -111,7 +121,14 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 	}
 
 	logger := logging.GetLogger(ctx)
-	logger.Info("starting UA event consumer", "transport", ec.config.Transport, "address", ec.config.Address)
+	logger.Info(
+		"starting UA event consumer",
+		"consumer_id", ec.consumerID(),
+		"transport", ec.config.Transport,
+		"address", ec.config.Address,
+		"handler_count", len(ec.eventHandlers),
+		"handler_types", ec.handlerTypesLocked(),
+	)
 
 	// Reset stop channel for fresh start
 	ec.stopChan = make(chan struct{})
@@ -141,7 +158,12 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 	// Start event processing loop
 	go ec.processEventLoop(ctx)
 
-	logger.Info("event consumer started")
+	logger.Info(
+		"event consumer started",
+		"consumer_id", ec.consumerID(),
+		"handler_count", len(ec.eventHandlers),
+		"handler_types", ec.handlerTypesLocked(),
+	)
 	return nil
 }
 
@@ -431,11 +453,23 @@ func (ec *EventConsumer) HandleEvent(ctx context.Context, event *types.UAEvent) 
 	)
 
 	// Call registered handler if exists
-	if handler, exists := ec.eventHandlers[event.EventType]; exists {
+	ec.mu.RLock()
+	handler, exists := ec.eventHandlers[event.EventType]
+	handlerTypes := ec.handlerTypesLocked()
+	handlerCount := len(ec.eventHandlers)
+	ec.mu.RUnlock()
+	if exists {
+		logger.Info(
+			"dispatching registered event handler",
+			"consumer_id", ec.consumerID(),
+			"handler_count", handlerCount,
+			"handler_types", handlerTypes,
+		)
 		if err := handler(ctx, event); err != nil {
 			logger.Error("handler error", "error", err)
 			return err
 		}
+		return nil
 	}
 
 	// Process event based on type
@@ -486,9 +520,28 @@ func (ec *EventConsumer) HandleEvent(ctx context.Context, event *types.UAEvent) 
 		return ec.handleConsentStateUpdated(ctx, event)
 
 	default:
-		logger.Warn("unknown event type", "event_type", event.EventType)
+		logger.Warn(
+			"unknown event type",
+			"consumer_id", ec.consumerID(),
+			"event_type", event.EventType,
+			"handler_count", handlerCount,
+			"handler_types", handlerTypes,
+		)
 		return nil
 	}
+}
+
+func (ec *EventConsumer) consumerID() string {
+	return fmt.Sprintf("%p", ec)
+}
+
+func (ec *EventConsumer) handlerTypesLocked() []string {
+	types := make([]string, 0, len(ec.eventHandlers))
+	for eventType := range ec.eventHandlers {
+		types = append(types, eventType)
+	}
+	sort.Strings(types)
+	return types
 }
 
 // ===== Event Handlers =====

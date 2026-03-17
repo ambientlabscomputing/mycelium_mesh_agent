@@ -40,6 +40,7 @@ type activeTunnel struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	forwardDone chan error // closed when Forward() exits
+	stopProxy   func()     // non-nil if a URL reverse proxy is running for this tunnel
 }
 
 // NewHyphaeProvider creates a new Hyphae exposure provider with file-based certs.
@@ -130,6 +131,21 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		)
 	}
 
+	// If a target URL is specified, start a local reverse proxy and use its
+	// loopback address as the forwarding target for the Hyphae tunnel.
+	effectiveLocalAddr := req.LocalAddr
+	var stopProxy func()
+	if req.TargetURL != "" {
+		proxyAddr, proxyStop, err := StartURLProxy(ctx, req.TargetURL)
+		if err != nil {
+			logger.Error("failed to start URL proxy", "error", err, "target_url", req.TargetURL)
+			return nil, fmt.Errorf("failed to start URL proxy: %w", err)
+		}
+		effectiveLocalAddr = proxyAddr
+		stopProxy = proxyStop
+		logger.Info("started URL proxy", "proxy_addr", proxyAddr, "target_url", req.TargetURL)
+	}
+
 	// Create a dedicated TunnelClient for this exposure.
 	client, err := sdk.NewTunnelClient(exposureCfg)
 	if err != nil {
@@ -154,7 +170,7 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 	// Start forwarding in a goroutine.
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- client.Forward(tunnelCtx, req.LocalAddr)
+		forwardDone <- client.Forward(tunnelCtx, effectiveLocalAddr)
 	}()
 
 	// Store the active tunnel with its dedicated client.
@@ -163,12 +179,13 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		exposureID:  req.ExposureID,
 		leaseID:     req.LeaseID,
 		hostname:    req.Hostname,
-		localAddr:   req.LocalAddr,
+		localAddr:   effectiveLocalAddr,
 		status:      "bound",
 		client:      client,
 		ctx:         tunnelCtx,
 		cancel:      cancel,
 		forwardDone: forwardDone,
+		stopProxy:   stopProxy,
 	}
 	p.mu.Unlock()
 
@@ -177,7 +194,7 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		"lease_id", req.LeaseID,
 		"hostname", req.Hostname,
 		"target_port", req.TargetPort,
-		"local_addr", req.LocalAddr,
+		"local_addr", effectiveLocalAddr,
 	)
 
 	// Build the public URL
@@ -210,6 +227,11 @@ func (p *HyphaeProvider) Unbind(ctx context.Context, exposureID string) error {
 	tunnel.cancel()
 	if err := tunnel.client.Close(); err != nil {
 		logger.Warn("error closing tunnel client", "error", err)
+	}
+
+	// Stop the URL reverse proxy, if one was started for this tunnel.
+	if tunnel.stopProxy != nil {
+		tunnel.stopProxy()
 	}
 
 	// Wait for Forward() to exit with a timeout.

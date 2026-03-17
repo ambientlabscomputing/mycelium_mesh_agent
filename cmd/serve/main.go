@@ -74,12 +74,6 @@ func (l *Launcher) Start(ctx context.Context) error {
 	controlChannelConfig := l.config.GetControlChannelConfig()
 	l.eventConsumer = discovery.NewEventConsumer(l.registry, controlChannelConfig)
 
-	if err := l.eventConsumer.Start(ctx); err != nil {
-		logger.Error("failed to start event consumer", "error", err)
-		return err
-	}
-	logger.Info("event consumer started")
-
 	// Initialize capability cache (for now, empty)
 	capCache := &types.CapabilityCache{
 		Version:           "1.0.0",
@@ -228,6 +222,12 @@ func (l *Launcher) Start(ctx context.Context) error {
 	} else {
 		logger.Warn("Hyphae exposure provider disabled in configuration")
 	}
+
+	if err := l.eventConsumer.Start(ctx); err != nil {
+		logger.Error("failed to start event consumer", "error", err)
+		return err
+	}
+	logger.Info("event consumer started")
 
 	// Initialize telemetry (before binding engine so it can emit audit events)
 	telemetryConfig := l.config.GetTelemetryConfig()

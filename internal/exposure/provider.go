@@ -24,6 +24,10 @@ type BindRequest struct {
 	// the exposure.bind.request Spine event so that server_api controls which
 	// Hyphae instance each exposure connects to.
 	TunnelAddr string
+	// TargetURL, when non-empty, specifies a full URL to reverse-proxy to.
+	// The provider will start a local httputil.ReverseProxy and use its address
+	// as the effective LocalAddr for the Hyphae tunnel.
+	TargetURL string
 }
 
 type BindResult struct {

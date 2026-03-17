@@ -188,6 +188,30 @@ type ExposureUnbindCompletedPayload struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// ===== Tunnel Events =====
+
+type TunnelBindRequestedPayload struct {
+	TunnelID         string `json:"tunnel_id"`
+	LeaseID          string `json:"lease_id"`
+	Hostname         string `json:"hostname"`
+	Target           string `json:"target"`      // port number or URL
+	TargetType       string `json:"target_type"` // "port" or "url"
+	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"`
+}
+
+type TunnelBindCompletedPayload struct {
+	TunnelID  string `json:"tunnel_id"`
+	LeaseID   string `json:"lease_id"`
+	Status    string `json:"status"` // "bound" or "error"
+	PublicURL string `json:"public_url,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type TunnelUnbindRequestedPayload struct {
+	TunnelID string `json:"tunnel_id"`
+	LeaseID  string `json:"lease_id"`
+}
+
 // ===== Event Type Constants =====
 
 const (
@@ -210,6 +234,10 @@ const (
 	EventExposureBindCompleted          = "exposure.bind.completed"
 	EventExposureUnbindRequested        = "exposure.unbind.requested"
 	EventExposureUnbindCompleted        = "exposure.unbind.completed"
+	EventTunnelBindRequested            = "tunnel.bind.requested"
+	EventTunnelBindCompleted            = "tunnel.bind.completed"
+	EventTunnelUnbindRequested          = "tunnel.unbind.requested"
+	EventTunnelUnbindCompleted          = "tunnel.unbind.completed"
 )
 
 // ===== Binding Types =====
