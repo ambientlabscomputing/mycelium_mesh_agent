@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/binding_engine"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/channel"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/config"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/discovery"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/exposure"
@@ -219,6 +220,14 @@ func (l *Launcher) Start(ctx context.Context) error {
 			return err
 		}
 		logger.Info("exposure event handlers registered")
+
+		// Register channel event handlers (UNDF-111 peer-to-peer relay)
+		channelProvider := channel.NewHyphaeProviderWithTLS(hyphaeConfig, tunneClientTLSCfg, logger)
+		if err := channel.RegisterHandlers(l.eventConsumer, channelProvider, kernelEmitter); err != nil {
+			logger.Error("failed to register channel handlers", "error", err)
+			return err
+		}
+		logger.Info("channel event handlers registered")
 	} else {
 		logger.Warn("Hyphae exposure provider disabled in configuration")
 	}

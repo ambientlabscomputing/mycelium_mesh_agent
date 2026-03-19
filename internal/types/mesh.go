@@ -212,6 +212,31 @@ type TunnelUnbindRequestedPayload struct {
 	LeaseID  string `json:"lease_id"`
 }
 
+// ===== Channel Events (UNDF-111) =====
+
+// ChannelBindRequestedPayload is the Spine event payload forwarded to MMA
+// when server_api publishes a channel.bind.request event.
+type ChannelBindRequestedPayload struct {
+	ChannelID        string `json:"channel_id"`
+	OrgID            string `json:"org_id"`
+	Role             string `json:"role"`              // "listener" | "initiator"
+	Grant            string `json:"grant,omitempty"`   // ES256 JWT; only for "initiator"
+	SourceServerID   string `json:"source_server_id"`
+	DestServerID     string `json:"dest_server_id"`
+	Purpose          string `json:"purpose,omitempty"`
+	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"`
+	ExpiresAt        int64  `json:"expires_at"`
+	CreatedAt        int64  `json:"created_at"`
+}
+
+// ChannelBindCompletedPayload is emitted by MMA after a channel bind attempt.
+type ChannelBindCompletedPayload struct {
+	ChannelID string `json:"channel_id"`
+	Role      string `json:"role"`
+	Status    string `json:"status"` // "active" or "error"
+	Error     string `json:"error,omitempty"`
+}
+
 // ===== Event Type Constants =====
 
 const (
@@ -238,6 +263,9 @@ const (
 	EventTunnelBindCompleted            = "tunnel.bind.completed"
 	EventTunnelUnbindRequested          = "tunnel.unbind.requested"
 	EventTunnelUnbindCompleted          = "tunnel.unbind.completed"
+
+	EventChannelBindRequested  = "channel.bind.requested"  // server_api requests agent to bind a relay channel
+	EventChannelBindCompleted  = "channel.bind.completed"  // agent reports bind success/failure
 )
 
 // ===== Binding Types =====

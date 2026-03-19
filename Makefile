@@ -22,9 +22,9 @@ help:
 	@echo ""
 
 ## run: Run the mycelium mesh agent
-## Uses the OrbStack VM FQDN from hyphae/devops/.vm-name so it survives VM
+## Uses the OrbStack VM FQDN from public_vm/.vm-name so it survives VM
 ## recreation without certificate changes (tunnel cert is a *.orb.local wildcard).
-HYPHAE_VM_NAME ?= $(shell cat $(CURDIR)/../../hyphae/devops/.vm-name 2>/dev/null)
+HYPHAE_VM_NAME ?= $(shell cat $(CURDIR)/../../public_vm/.vm-name 2>/dev/null)
 HYPHAE_VM_FQDN  = $(HYPHAE_VM_NAME).orb.local
 
 .PHONY: run
