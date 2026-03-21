@@ -9,6 +9,11 @@ type Provider interface {
 	Name() string
 	BindChannel(ctx context.Context, req *BindRequest) error
 	UnbindChannel(ctx context.Context, channelID string) error
+	// LocalAddr returns the local TCP address of the relay socket for channelID.
+	// For the initiator role this is the loopback port that local services dial
+	// to send data through the channel.  Returns ("", false) if no relay socket
+	// is available (listener role or channel not yet active).
+	LocalAddr(channelID string) (string, bool)
 	Close() error
 }
 

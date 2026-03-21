@@ -6,9 +6,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,9 +39,10 @@ type HyphaeProvider struct {
 }
 
 type activeChannel struct {
-	cancel  context.CancelFunc
-	conn    net.Conn       // nil for listener (uses session instead)
-	session *yamux.Session // nil for initiator
+	cancel    context.CancelFunc
+	conn      net.Conn       // nil for listener (uses session instead)
+	session   *yamux.Session // nil for initiator
+	localAddr string         // loopback relay addr for initiator; empty for listener
 }
 
 // NewHyphaeProvider creates a provider using file-based mTLS certs.
@@ -173,7 +177,7 @@ func (p *HyphaeProvider) bindListener(ctx context.Context, req *BindRequest) err
 	p.mu.Unlock()
 
 	// Background goroutine: accept incoming channel streams from Hyphae.
-	go p.acceptLoop(bindCtx, req.ChannelID, sess)
+	go p.acceptLoop(bindCtx, req.ChannelID, req.Purpose, sess)
 
 	p.logger.Info("channel listener registered",
 		"channel_id", req.ChannelID,
@@ -184,8 +188,9 @@ func (p *HyphaeProvider) bindListener(ctx context.Context, req *BindRequest) err
 }
 
 // acceptLoop accepts yamux streams opened by Hyphae for incoming channels.
-// Each stream is a raw net.Conn to the initiator side.
-func (p *HyphaeProvider) acceptLoop(ctx context.Context, channelID string, sess *yamux.Session) {
+// Each stream is a transparent relay from the initiator — we connect to the
+// local service and splice bytes in both directions.
+func (p *HyphaeProvider) acceptLoop(ctx context.Context, channelID string, purpose string, sess *yamux.Session) {
 	logger := p.logger.With("channel_id", channelID)
 	for {
 		stream, err := sess.Accept()
@@ -197,10 +202,37 @@ func (p *HyphaeProvider) acceptLoop(ctx context.Context, channelID string, sess 
 			}
 			return
 		}
-		// TODO(UNDF-111): route stream to a local service based on channel purpose.
-		logger.Info("channel stream accepted — closing (routing not yet implemented)")
-		_ = stream.Close()
+		go p.forwardStream(ctx, channelID, purpose, stream, logger)
 	}
+}
+
+// forwardStream connects to the local service for *purpose* and splices bytes
+// bidirectionally between the incoming yamux stream and the local connection.
+func (p *HyphaeProvider) forwardStream(ctx context.Context, channelID, purpose string, stream net.Conn, logger *slog.Logger) {
+	defer stream.Close()
+
+	localAddr, err := p.resolveLocalAddr(purpose)
+	if err != nil {
+		logger.Error("channel listener: cannot resolve local service addr",
+			"channel_id", channelID, "purpose", purpose, "error", err)
+		return
+	}
+
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	local, err := d.DialContext(ctx, "tcp", localAddr)
+	if err != nil {
+		logger.Error("channel listener: dial local service failed",
+			"channel_id", channelID, "local_addr", localAddr, "error", err)
+		return
+	}
+	defer local.Close()
+
+	logger.Info("channel listener: splicing stream to local service",
+		"channel_id", channelID, "local_addr", localAddr)
+
+	aToB, bToA := splice(stream, local)
+	logger.Info("channel listener: stream closed",
+		"channel_id", channelID, "bytes_from_initiator", aToB, "bytes_to_initiator", bToA)
 }
 
 // ── initiator side ────────────────────────────────────────────────────────────
@@ -281,17 +313,144 @@ func (p *HyphaeProvider) bindInitiator(ctx context.Context, req *BindRequest) er
 	bindCtx, cancel := context.WithCancel(context.Background())
 	rawConn := newBufferedConn(conn, br)
 
+	// Start a local TCP listener on a loopback port so that local services can
+	// dial into the channel as if it were a plain TCP connection.  Any data
+	// written to that loopback port is transparently relayed through Hyphae to
+	// the destination node's listener.
+	localListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		rawConn.Close()
+		cancel()
+		return fmt.Errorf("bindInitiator: local listener: %w", err)
+	}
+	localAddr := localListener.Addr().String()
+
 	p.mu.Lock()
-	p.active[req.ChannelID] = &activeChannel{cancel: cancel, conn: rawConn}
+	p.active[req.ChannelID] = &activeChannel{cancel: cancel, conn: rawConn, localAddr: localAddr}
 	p.mu.Unlock()
 
-	p.logger.Info("channel initiator connected",
+	p.logger.Info("channel initiator connected — local relay listener ready",
 		"channel_id", req.ChannelID,
 		"tunnel_addr", tunnelAddr,
+		"local_addr", localAddr,
 	)
-	// TODO(UNDF-111): pipe rawConn to a local service based on channel purpose.
-	_ = bindCtx
+
+	go p.runInitiatorRelay(bindCtx, req.ChannelID, rawConn, localListener)
 	return nil
+}
+
+// runInitiatorRelay accepts exactly one local connection and splices it with
+// the raw Hyphae channel connection.  The design mirrors the single-stream
+// nature of the Hyphae channel relay: one channel = one bidirectional pipe.
+// When the channel is closed (context cancelled) the listener is also closed.
+func (p *HyphaeProvider) runInitiatorRelay(
+	ctx context.Context,
+	channelID string,
+	remoteConn net.Conn,
+	ln net.Listener,
+) {
+	logger := p.logger.With("channel_id", channelID)
+	defer remoteConn.Close()
+	defer ln.Close()
+
+	// Close the listener when the channel context is cancelled.
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+	}()
+
+	localConn, err := ln.Accept()
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			// Normal shutdown.
+		default:
+			logger.Warn("channel initiator: local accept error", "error", err)
+		}
+		return
+	}
+	defer localConn.Close()
+
+	logger.Info("channel initiator: splicing local connection to Hyphae relay",
+		"local_remote_addr", localConn.RemoteAddr())
+
+	aToB, bToA := splice(localConn, remoteConn)
+	logger.Info("channel initiator: stream closed",
+		"bytes_to_dest", aToB, "bytes_from_dest", bToA)
+}
+
+// LocalAddr returns the loopback relay address for a channel in the initiator
+// role.  Returns ("", false) if the channel does not exist or is a listener.
+func (p *HyphaeProvider) LocalAddr(channelID string) (string, bool) {
+	p.mu.Lock()
+	ac, ok := p.active[channelID]
+	p.mu.Unlock()
+	if !ok || ac.localAddr == "" {
+		return "", false
+	}
+	return ac.localAddr, true
+}
+
+// ── routing helpers ───────────────────────────────────────────────────────────
+
+// resolveLocalAddr returns the local TCP address for the given channel purpose.
+// The purpose string is expected to be either:
+//   - A raw "host:port" address (used directly), or
+//   - A logical label (e.g. "secret-replication") resolved via the provider config.
+//
+// If no mapping is found, an error is returned so the caller can log and drop
+// the stream rather than panicking.
+func (p *HyphaeProvider) resolveLocalAddr(purpose string) (string, error) {
+	// Check the explicit purpose→addr map in the config first.
+	if p.cfg.ChannelRoutes != nil {
+		if addr, ok := p.cfg.ChannelRoutes[purpose]; ok && addr != "" {
+			return addr, nil
+		}
+	}
+	// For secret-replication channels, route to the agent's replication listener.
+	// The listener address is injected by the agent at startup as UA_SECRET_REPLICATION_ADDR
+	// or configured via hyphae.channel_routes["secret-replication"].
+	if strings.HasPrefix(purpose, "secret-replication:") {
+		if addr := os.Getenv("UA_SECRET_REPLICATION_ADDR"); addr != "" {
+			return addr, nil
+		}
+		if p.cfg.ChannelRoutes != nil {
+			if addr, ok := p.cfg.ChannelRoutes["secret-replication"]; ok && addr != "" {
+				return addr, nil
+			}
+		}
+	}
+	// Fall back to a generic "host:port" purpose value (e.g. "127.0.0.1:5000").
+	_, _, err := net.SplitHostPort(purpose)
+	if err == nil {
+		// purpose is already a valid host:port — use it directly.
+		return purpose, nil
+	}
+	return "", fmt.Errorf("no local address mapping for channel purpose %q; "+
+		"add an entry to hyphae.channel_routes in the agent config", purpose)
+}
+
+// splice bidirectionally copies data between a and b until either side closes
+// or returns an error.  It returns the byte counts in each direction.
+func splice(a, b io.ReadWriteCloser) (aToB, bToA int64) {
+	type result struct{ n int64 }
+	chA := make(chan result, 1)
+	chB := make(chan result, 1)
+
+	go func() {
+		n, _ := io.Copy(b, a)
+		_ = b.Close()
+		chA <- result{n}
+	}()
+	go func() {
+		n, _ := io.Copy(a, b)
+		_ = a.Close()
+		chB <- result{n}
+	}()
+
+	r1 := <-chA
+	r2 := <-chB
+	return r1.n, r2.n
 }
 
 // ── TLS helpers ───────────────────────────────────────────────────────────────

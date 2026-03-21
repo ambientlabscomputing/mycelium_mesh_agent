@@ -69,6 +69,10 @@ func handleChannelBindRequested(ctx context.Context, provider Provider, emitter 
 			completedPayload["status"] = "error"
 			completedPayload["error"] = err.Error()
 		}
+		// Include the initiator's local relay address so server_api can expose it.
+		if localAddr, ok := provider.LocalAddr(payload.ChannelID); ok {
+			completedPayload["local_addr"] = localAddr
+		}
 		if emitErr := emitter.EmitEvent(ctx, types.EventChannelBindCompleted, "channel", payload.ChannelID, completedPayload); emitErr != nil {
 			logger.Error("failed to emit channel bind completed event", "error", emitErr)
 		}

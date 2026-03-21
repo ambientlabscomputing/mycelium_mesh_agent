@@ -173,6 +173,17 @@ type HyphaeConfig struct {
 
 	// AutoReconnect whether to automatically reconnect on tunnel loss
 	AutoReconnect bool `yaml:"auto_reconnect" json:"auto_reconnect"`
+
+	// ChannelRoutes maps channel purpose labels to local TCP addresses.
+	// When the agent acts as a channel listener it dials the mapped address
+	// for each accepted stream.  A purpose value may also be a raw "host:port"
+	// string in which case this map is not consulted.
+	//
+	// Example:
+	//   channel_routes:
+	//     secret-replication: "127.0.0.1:5432"
+	//     grpc-mesh:          "127.0.0.1:9000"
+	ChannelRoutes map[string]string `yaml:"channel_routes" json:"channel_routes"`
 }
 
 // DefaultMMAConfig returns a configuration with sensible defaults.

@@ -40,6 +40,8 @@ func (m *mockChannelProvider) UnbindChannel(_ context.Context, channelID string)
 	return m.unbindErr
 }
 
+func (m *mockChannelProvider) LocalAddr(_ string) (string, bool) { return "", false }
+
 func (m *mockChannelProvider) Close() error { return nil }
 
 func makeChannelBindEvent(channelID, orgID, role, grant, srcID, dstID string) *mmtypes.UAEvent {
