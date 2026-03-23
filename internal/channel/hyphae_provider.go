@@ -119,6 +119,16 @@ func (p *HyphaeProvider) Close() error {
 // ── listener side ─────────────────────────────────────────────────────────────
 
 func (p *HyphaeProvider) bindListener(ctx context.Context, req *BindRequest) error {
+	// Idempotency guard: skip if this channel is already bound.
+	p.mu.Lock()
+	if _, already := p.active[req.ChannelID]; already {
+		p.mu.Unlock()
+		p.logger.Info("channel listener already bound, skipping",
+			"channel_id", req.ChannelID)
+		return nil
+	}
+	p.mu.Unlock()
+
 	tunnelAddr := req.HyphaeTunnelAddr
 	if tunnelAddr == "" {
 		tunnelAddr = p.cfg.TunnelAddr
@@ -144,6 +154,7 @@ func (p *HyphaeProvider) bindListener(ctx context.Context, req *BindRequest) err
 	httpReq.Header.Set("Connection", "Upgrade")
 	httpReq.Header.Set("X-Listener-Register", "true")
 	httpReq.Header.Set("X-Org-ID", req.OrgID)
+	httpReq.Header.Set("X-Channel-ID", req.ChannelID)
 
 	if err := httpReq.Write(conn); err != nil {
 		conn.Close()
@@ -242,6 +253,16 @@ func (p *HyphaeProvider) bindInitiator(ctx context.Context, req *BindRequest) er
 		return fmt.Errorf("bindInitiator: grant is required for initiator role")
 	}
 
+	// Idempotency guard: skip if this channel is already bound.
+	p.mu.Lock()
+	if _, already := p.active[req.ChannelID]; already {
+		p.mu.Unlock()
+		p.logger.Info("channel initiator already bound, skipping",
+			"channel_id", req.ChannelID)
+		return nil
+	}
+	p.mu.Unlock()
+
 	tunnelAddr := req.HyphaeTunnelAddr
 	if tunnelAddr == "" {
 		tunnelAddr = p.cfg.TunnelAddr
@@ -335,7 +356,12 @@ func (p *HyphaeProvider) bindInitiator(ctx context.Context, req *BindRequest) er
 		"local_addr", localAddr,
 	)
 
-	go p.runInitiatorRelay(bindCtx, req.ChannelID, rawConn, localListener)
+	// readyCh is closed by runInitiatorRelay just before it blocks on Accept,
+	// guaranteeing the listener is ready to forward data before this function
+	// returns and the channel.bind.completed event is emitted.
+	readyCh := make(chan struct{})
+	go p.runInitiatorRelay(bindCtx, req.ChannelID, rawConn, localListener, readyCh)
+	<-readyCh
 	return nil
 }
 
@@ -343,11 +369,15 @@ func (p *HyphaeProvider) bindInitiator(ctx context.Context, req *BindRequest) er
 // the raw Hyphae channel connection.  The design mirrors the single-stream
 // nature of the Hyphae channel relay: one channel = one bidirectional pipe.
 // When the channel is closed (context cancelled) the listener is also closed.
+//
+// readyCh is closed just before Accept blocks, signalling to the caller
+// (bindInitiator) that the relay is ready to accept inbound connections.
 func (p *HyphaeProvider) runInitiatorRelay(
 	ctx context.Context,
 	channelID string,
 	remoteConn net.Conn,
 	ln net.Listener,
+	readyCh chan struct{},
 ) {
 	logger := p.logger.With("channel_id", channelID)
 	defer remoteConn.Close()
@@ -358,6 +388,10 @@ func (p *HyphaeProvider) runInitiatorRelay(
 		<-ctx.Done()
 		ln.Close()
 	}()
+
+	// Signal to bindInitiator that Accept is about to block — the relay is
+	// now ready to forward an inbound connection.
+	close(readyCh)
 
 	localConn, err := ln.Accept()
 	if err != nil {
