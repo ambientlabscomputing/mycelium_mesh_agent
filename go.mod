@@ -3,9 +3,10 @@ module github.com/ambientlabscomputing/mycelium_mesh_agent
 go 1.25.5
 
 require (
-	github.com/ambientlabscomputing/hyphae v1.0.1
-	github.com/ambientlabscomputing/umc_sdk v0.1.4
+	github.com/ambientlabscomputing/hyphae v1.1.0-rc.1
+	github.com/ambientlabscomputing/umc_sdk v0.1.5-rc.1
 	github.com/gin-gonic/gin v1.11.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/lmittmann/tint v1.1.3
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
@@ -23,7 +24,6 @@ require (
 	github.com/go-playground/validator/v10 v10.27.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/goccy/go-yaml v1.18.0 // indirect
-	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
