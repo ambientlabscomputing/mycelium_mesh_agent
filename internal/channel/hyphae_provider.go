@@ -219,6 +219,12 @@ func (p *HyphaeProvider) acceptLoop(ctx context.Context, channelID string, purpo
 
 // forwardStream connects to the local service for *purpose* and splices bytes
 // bidirectionally between the incoming yamux stream and the local connection.
+//
+// The local dial is deferred until the first byte arrives on the yamux stream.
+// This avoids connecting to the local service before data is actually flowing,
+// which prevents servers with short idle timeouts (e.g. gunicorn's default
+// 2-second keep-alive) from closing the connection before the initiator sends
+// any traffic.
 func (p *HyphaeProvider) forwardStream(ctx context.Context, channelID, purpose string, stream net.Conn, logger *slog.Logger) {
 	defer stream.Close()
 
@@ -226,6 +232,16 @@ func (p *HyphaeProvider) forwardStream(ctx context.Context, channelID, purpose s
 	if err != nil {
 		logger.Error("channel listener: cannot resolve local service addr",
 			"channel_id", channelID, "purpose", purpose, "error", err)
+		return
+	}
+
+	// Wait for the first byte on the yamux stream before dialing the local
+	// service.  This keeps the stream open during idle periods and only
+	// establishes the local connection when actual traffic arrives.
+	firstByte := make([]byte, 1)
+	if _, err := io.ReadFull(stream, firstByte); err != nil {
+		logger.Info("channel listener: stream closed before first byte",
+			"channel_id", channelID, "error", err)
 		return
 	}
 
@@ -238,12 +254,19 @@ func (p *HyphaeProvider) forwardStream(ctx context.Context, channelID, purpose s
 	}
 	defer local.Close()
 
+	// Write the first byte that triggered the dial.
+	if _, err := local.Write(firstByte); err != nil {
+		logger.Error("channel listener: failed to write first byte to local service",
+			"channel_id", channelID, "error", err)
+		return
+	}
+
 	logger.Info("channel listener: splicing stream to local service",
 		"channel_id", channelID, "local_addr", localAddr)
 
 	aToB, bToA := splice(stream, local)
 	logger.Info("channel listener: stream closed",
-		"channel_id", channelID, "bytes_from_initiator", aToB, "bytes_to_initiator", bToA)
+		"channel_id", channelID, "bytes_from_initiator", aToB+1, "bytes_to_initiator", bToA)
 }
 
 // ── initiator side ────────────────────────────────────────────────────────────

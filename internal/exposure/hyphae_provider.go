@@ -180,7 +180,7 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		leaseID:     req.LeaseID,
 		hostname:    req.Hostname,
 		localAddr:   effectiveLocalAddr,
-		status:      "bound",
+		status:      "success",
 		client:      client,
 		ctx:         tunnelCtx,
 		cancel:      cancel,
@@ -204,7 +204,7 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		ExposureID: req.ExposureID,
 		LeaseID:    req.LeaseID,
 		PublicURL:  publicURL,
-		Status:     "bound",
+		Status:     "success",
 	}, nil
 }
 

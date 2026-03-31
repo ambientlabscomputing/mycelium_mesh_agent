@@ -83,12 +83,12 @@ func handleExposureBindRequested(ctx context.Context, provider Provider, emitter
 		completedPayload := map[string]interface{}{
 			"exposure_id": payload.ExposureID,
 			"lease_id":    payload.LeaseID,
-			"status":      "bound",
+			"status":      "success",
 			"public_url":  "",
 			"error":       "",
 		}
 		if err != nil {
-			completedPayload["status"] = "error"
+			completedPayload["status"] = "failure"
 			completedPayload["error"] = err.Error()
 		} else {
 			completedPayload["public_url"] = bindResult.PublicURL
@@ -198,12 +198,12 @@ func handleTunnelBindRequested(ctx context.Context, provider Provider, emitter *
 		completedPayload := map[string]interface{}{
 			"tunnel_id":  payload.TunnelID,
 			"lease_id":   payload.LeaseID,
-			"status":     "bound",
+			"status":     "success",
 			"public_url": "",
 			"error":      "",
 		}
 		if err != nil {
-			completedPayload["status"] = "error"
+			completedPayload["status"] = "failure"
 			completedPayload["error"] = err.Error()
 		} else {
 			completedPayload["public_url"] = bindResult.PublicURL

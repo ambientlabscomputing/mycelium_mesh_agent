@@ -62,11 +62,11 @@ func handleChannelBindRequested(ctx context.Context, provider Provider, emitter 
 		completedPayload := map[string]interface{}{
 			"channel_id": payload.ChannelID,
 			"role":       payload.Role,
-			"status":     "active",
+			"status":     "success",
 			"error":      "",
 		}
 		if err != nil {
-			completedPayload["status"] = "error"
+			completedPayload["status"] = "failure"
 			completedPayload["error"] = err.Error()
 		}
 		// Include the initiator's local relay address so server_api can expose it.
