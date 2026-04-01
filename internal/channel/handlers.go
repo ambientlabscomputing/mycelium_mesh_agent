@@ -21,6 +21,13 @@ func RegisterHandlers(ec *discovery.EventConsumer, provider Provider, emitter *k
 		return handleChannelBindRequested(ctx, provider, emitter, event)
 	})
 
+	// Register dynamic channel route handler if the provider supports it.
+	if hp, ok := provider.(*HyphaeProvider); ok {
+		ec.RegisterHandler(types.EventChannelRouteRegister, func(ctx context.Context, event *types.UAEvent) error {
+			return handleChannelRouteRegister(ctx, hp, event)
+		})
+	}
+
 	logger.Info("channel event handlers registered")
 	return nil
 }
@@ -96,5 +103,36 @@ func unmarshalPayload(payload interface{}, dst interface{}) error {
 	if err := json.Unmarshal(b, dst); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
+	return nil
+}
+
+// channelRouteRegisterPayload is the JSON shape of a channel.route.register event.
+type channelRouteRegisterPayload struct {
+	Purpose string `json:"purpose"`
+	Addr    string `json:"addr"`
+}
+
+// handleChannelRouteRegister handles channel.route.register events from the agent.
+// The agent emits this event after starting a local service listener (e.g. the
+// secret-replication TCP handler) so that MMA can dynamically route inbound
+// Hyphae streams to the correct local address.
+func handleChannelRouteRegister(ctx context.Context, provider *HyphaeProvider, event *types.UAEvent) error {
+	logger := logging.GetLogger(ctx).With(
+		"event_type", event.EventType,
+		"event_id", event.EventID,
+	)
+
+	var payload channelRouteRegisterPayload
+	if err := unmarshalPayload(event.Payload, &payload); err != nil {
+		logger.Error("failed to unmarshal channel route register payload", "error", err)
+		return err
+	}
+	if payload.Purpose == "" || payload.Addr == "" {
+		logger.Error("channel route register payload missing purpose or addr",
+			"purpose", payload.Purpose, "addr", payload.Addr)
+		return fmt.Errorf("channel.route.register: purpose and addr are required")
+	}
+
+	provider.RegisterRoute(payload.Purpose, payload.Addr)
 	return nil
 }

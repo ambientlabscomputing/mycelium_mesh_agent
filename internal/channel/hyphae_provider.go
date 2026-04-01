@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +35,9 @@ type HyphaeProvider struct {
 
 	mu     sync.Mutex
 	active map[string]*activeChannel // channelID → state
+
+	routesMu      sync.RWMutex
+	dynamicRoutes map[string]string // purpose-prefix → local addr, registered at runtime via event stream
 }
 
 type activeChannel struct {
@@ -57,10 +59,11 @@ func NewHyphaeProviderWithTLS(cfg config.HyphaeConfig, tlsCfg *tls.Config, logge
 		logger = slog.Default()
 	}
 	return &HyphaeProvider{
-		cfg:    cfg,
-		tlsCfg: tlsCfg,
-		logger: logger.With("provider", "hyphae_channel"),
-		active: make(map[string]*activeChannel),
+		cfg:           cfg,
+		tlsCfg:        tlsCfg,
+		logger:        logger.With("provider", "hyphae_channel"),
+		active:        make(map[string]*activeChannel),
+		dynamicRoutes: make(map[string]string),
 	}
 }
 
@@ -450,41 +453,63 @@ func (p *HyphaeProvider) LocalAddr(channelID string) (string, bool) {
 
 // ── routing helpers ───────────────────────────────────────────────────────────
 
+// RegisterRoute maps a purpose prefix to a local TCP address at runtime.
+// The agent emits a channel.route.register event after starting a local
+// service listener; MMA calls this to record the mapping so that future
+// resolveLocalAddr calls for that purpose succeed.
+func (p *HyphaeProvider) RegisterRoute(purpose, addr string) {
+	p.routesMu.Lock()
+	p.dynamicRoutes[purpose] = addr
+	p.routesMu.Unlock()
+	p.logger.Info("channel route registered", "purpose", purpose, "addr", addr)
+}
+
 // resolveLocalAddr returns the local TCP address for the given channel purpose.
-// The purpose string is expected to be either:
-//   - A raw "host:port" address (used directly), or
-//   - A logical label (e.g. "secret-replication") resolved via the provider config.
-//
-// If no mapping is found, an error is returned so the caller can log and drop
-// the stream rather than panicking.
+// Resolution order:
+//  1. Dynamic routes registered at runtime via RegisterRoute (prefix match).
+//  2. Static channel_routes from the provider config (exact match on full purpose).
+//  3. Raw "host:port" passthrough if the purpose string is a valid address.
 func (p *HyphaeProvider) resolveLocalAddr(purpose string) (string, error) {
-	// Check the explicit purpose→addr map in the config first.
+	// 1. Check dynamic routes — prefix match (e.g. "secret-replication" matches
+	//    purpose "secret-replication:<uuid>").
+	p.routesMu.RLock()
+	for prefix, addr := range p.dynamicRoutes {
+		if purpose == prefix || strings.HasPrefix(purpose, prefix+":") {
+			p.routesMu.RUnlock()
+			return addr, nil
+		}
+	}
+	p.routesMu.RUnlock()
+
+	// 2. Check the explicit purpose→addr map in the config (exact match).
 	if p.cfg.ChannelRoutes != nil {
 		if addr, ok := p.cfg.ChannelRoutes[purpose]; ok && addr != "" {
 			return addr, nil
 		}
 	}
-	// For secret-replication channels, route to the agent's replication listener.
-	// The listener address is injected by the agent at startup as UA_SECRET_REPLICATION_ADDR
-	// or configured via hyphae.channel_routes["secret-replication"].
-	if strings.HasPrefix(purpose, "secret-replication:") {
-		if addr := os.Getenv("UA_SECRET_REPLICATION_ADDR"); addr != "" {
-			return addr, nil
-		}
-		if p.cfg.ChannelRoutes != nil {
-			if addr, ok := p.cfg.ChannelRoutes["secret-replication"]; ok && addr != "" {
-				return addr, nil
-			}
-		}
-	}
-	// Fall back to a generic "host:port" purpose value (e.g. "127.0.0.1:5000").
-	_, _, err := net.SplitHostPort(purpose)
-	if err == nil {
+
+	// 3. Fall back to a generic "host:port" purpose value (e.g. "127.0.0.1:5000").
+	// Only accept purposes where the port is numeric — otherwise purpose strings
+	// like "secret-replication:uuid" would match because SplitHostPort treats the
+	// UUID as a (non-numeric) port name.
+	host, port, err := net.SplitHostPort(purpose)
+	if err == nil && host != "" && port != "" && isNumeric(port) {
 		// purpose is already a valid host:port — use it directly.
 		return purpose, nil
 	}
 	return "", fmt.Errorf("no local address mapping for channel purpose %q; "+
-		"add an entry to hyphae.channel_routes in the agent config", purpose)
+		"register a route via channel.route.register or add an entry to "+
+		"hyphae.channel_routes in the agent config", purpose)
+}
+
+// isNumeric reports whether s consists entirely of ASCII digits.
+func isNumeric(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // splice bidirectionally copies data between a and b until either side closes

@@ -219,8 +219,8 @@ type TunnelUnbindRequestedPayload struct {
 type ChannelBindRequestedPayload struct {
 	ChannelID        string `json:"channel_id"`
 	OrgID            string `json:"org_id"`
-	Role             string `json:"role"`              // "listener" | "initiator"
-	Grant            string `json:"grant,omitempty"`   // ES256 JWT; only for "initiator"
+	Role             string `json:"role"`            // "listener" | "initiator"
+	Grant            string `json:"grant,omitempty"` // ES256 JWT; only for "initiator"
 	SourceServerID   string `json:"source_server_id"`
 	DestServerID     string `json:"dest_server_id"`
 	Purpose          string `json:"purpose,omitempty"`
@@ -264,8 +264,9 @@ const (
 	EventTunnelUnbindRequested          = "tunnel.unbind.requested"
 	EventTunnelUnbindCompleted          = "tunnel.unbind.completed"
 
-	EventChannelBindRequested  = "channel.bind.requested"  // server_api requests agent to bind a relay channel
-	EventChannelBindCompleted  = "channel.bind.completed"  // agent reports bind success/failure
+	EventChannelBindRequested = "channel.bind.requested" // server_api requests agent to bind a relay channel
+	EventChannelBindCompleted = "channel.bind.completed" // agent reports bind success/failure
+	EventChannelRouteRegister = "channel.route.register" // agent registers a local service addr for a channel purpose
 )
 
 // ===== Binding Types =====
