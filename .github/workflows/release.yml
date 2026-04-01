@@ -29,6 +29,7 @@ jobs:
         VERSION: ${{ github.ref_name }}
         COMMIT: ${{ github.sha }}
         BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+        GOPRIVATE: github.com/ambientlabscomputing/*
       run: |
         mkdir -p bin
         
