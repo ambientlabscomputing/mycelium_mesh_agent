@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/ambientlabscomputing/hyphae v1.1.1
-	github.com/ambientlabscomputing/umc_sdk v0.1.7
+	github.com/ambientlabscomputing/umc_sdk v0.1.9
 	github.com/gin-gonic/gin v1.12.0
 	github.com/hashicorp/yamux v0.1.2
 	github.com/lmittmann/tint v1.1.3
