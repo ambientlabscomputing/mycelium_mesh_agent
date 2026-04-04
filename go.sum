@@ -1,7 +1,7 @@
 github.com/ambientlabscomputing/hyphae v1.1.1 h1:5R/kVXKNlDVy0Fedm0Nw375MTxbGOCJDVJaIPvifa3U=
 github.com/ambientlabscomputing/hyphae v1.1.1/go.mod h1:N3dpfxuPIwUIIXWuELFSpGn/cgRH91lIeQKjlmAQJz8=
-github.com/ambientlabscomputing/umc_sdk v0.1.9 h1:mmDlK2nGQXfSF/bKD4bZzTV0Bh92dJeqN8d3g51wSzg=
-github.com/ambientlabscomputing/umc_sdk v0.1.9/go.mod h1:e4AHfluMdu5qFZK/49F+6EM5edwmsBjRmQGQ5fGP/5E=
+github.com/ambientlabscomputing/umc_sdk v0.2.0 h1:jn2Hz17uwmB5iHBZMlYXGuYtCdx6MwmpvLlKoOfsdMA=
+github.com/ambientlabscomputing/umc_sdk v0.2.0/go.mod h1:ZaLI8RFgHBQNDcn08YLYUzFVOGsL20YR8vRtCL9aSLY=
 github.com/bytedance/gopkg v0.1.3 h1:TPBSwH8RsouGCBcMBktLt1AymVo2TVsBVCY4b6TnZ/M=
 github.com/bytedance/gopkg v0.1.3/go.mod h1:576VvJ+eJgyCzdjS+c4+77QF3p7ubbtiKARP3TxducM=
 github.com/bytedance/sonic v1.15.0 h1:/PXeWFaR5ElNcVE84U0dOHjiMHQOwNIx3K4ymzh/uSE=
