@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -159,6 +160,21 @@ func (p *HyphaeProvider) Bind(ctx context.Context, req *BindRequest) (*BindResul
 		logger.Error("failed to connect tunnel", "error", err)
 		return nil, fmt.Errorf("failed to connect tunnel: %w", err)
 	}
+
+	// ── TCP health check ─────────────────────────────────────────────────
+	// Verify the local service is actually reachable before we report
+	// success. Without this check, the tunnel appears "bound" in Hyphae
+	// while all traffic silently fails with connection-refused upstream.
+	healthConn, dialErr := net.DialTimeout("tcp", effectiveLocalAddr, 5*time.Second)
+	if dialErr != nil {
+		client.Close() //nolint:errcheck
+		logger.Error("local service is not reachable — aborting exposure bind",
+			"local_addr", effectiveLocalAddr,
+			"error", dialErr,
+		)
+		return nil, fmt.Errorf("local service unreachable at %s: %w", effectiveLocalAddr, dialErr)
+	}
+	healthConn.Close()
 
 	// Create a context for this specific tunnel, rooted at Background so it
 	// is NOT tied to the event-handler context (which is cancelled as soon as
