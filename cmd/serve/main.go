@@ -439,6 +439,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 func Serve() error {
 	// Initialize logging
 	logFile := "mma.log"
+	if envLogFile := os.Getenv("LOG_FILE"); envLogFile != "" {
+		logFile = envLogFile
+	}
 	ctx, logger := logging.Init(context.Background(), logging.LoggerModeAgent, &logFile)
 	defer logger.Info("MMA shutdown complete")
 
