@@ -159,82 +159,63 @@ type ConsentStateUpdatedPayload struct {
 	Version      string                 `json:"version"`
 }
 
-// ===== Exposure Events =====
+// ===== Link Events (UNDF-140 — unified bind topic family) =====
 
-type ExposureBindRequestedPayload struct {
-	ExposureID       string `json:"exposure_id"`
-	LeaseID          string `json:"lease_id"`
-	Hostname         string `json:"hostname"`
-	TargetPort       int    `json:"target_port"`
-	LocalAddr        string `json:"local_addr"`         // resolved by agent from deployment service ports
-	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"` // tunnel server addr forwarded from server_api; overrides static agent config
+// LinkBindSpec carries kind-specific parameters for a link bind request.
+// Fields are populated selectively based on the link kind.
+type LinkBindSpec struct {
+	// Common (exposure + tunnel)
+	LeaseID string `json:"lease_id,omitempty"`
+	// Exposure-specific
+	TargetPort int    `json:"target_port,omitempty"`
+	LocalAddr  string `json:"local_addr,omitempty"` // resolved by agent from deployment service ports
+	// Tunnel-specific
+	Target     string `json:"target,omitempty"`      // port number or URL
+	TargetType string `json:"target_type,omitempty"` // "port" or "url"
+	// Channel-specific
+	Role           string `json:"role,omitempty"`             // "listener" | "initiator"
+	Grant          string `json:"grant,omitempty"`            // ES256 JWT; only for "initiator"
+	SourceServerID string `json:"source_server_id,omitempty"` // tunnel (remote) and channel
+	DestServerID   string `json:"dest_server_id,omitempty"`   // channel
+	Purpose        string `json:"purpose,omitempty"`          // channel
+	ExpiresAt      int64  `json:"expires_at,omitempty"`       // channel TTL
+	CreatedAt      int64  `json:"created_at,omitempty"`       // channel creation timestamp
 }
 
-type ExposureBindCompletedPayload struct {
-	ExposureID string `json:"exposure_id"`
-	LeaseID    string `json:"lease_id"`
-	Status     string `json:"status"` // "bound" or "error"
-	PublicURL  string `json:"public_url,omitempty"`
-	Error      string `json:"error,omitempty"`
+// LinkBindRequestedPayload is the unified UA event payload for link bind requests.
+// Replaces ExposureBindRequestedPayload, TunnelBindRequestedPayload, and ChannelBindRequestedPayload.
+type LinkBindRequestedPayload struct {
+	LinkID           string       `json:"link_id"`
+	Kind             string       `json:"kind"`             // "exposure" | "tunnel" | "channel"
+	OrgID            string       `json:"org_id,omitempty"` // org context (always set for channel)
+	Hostname         string       `json:"hostname,omitempty"`
+	HyphaeTunnelAddr string       `json:"hyphae_tunnel_addr"`
+	Spec             LinkBindSpec `json:"spec"`
 }
 
-type ExposureUnbindRequestedPayload struct {
-	ExposureID string `json:"exposure_id"`
-	LeaseID    string `json:"lease_id"`
+// LinkUnbindRequestedPayload is the unified UA event payload for link unbind requests.
+type LinkUnbindRequestedPayload struct {
+	LinkID string `json:"link_id"`
+	Kind   string `json:"kind"` // "exposure" | "tunnel" | "channel"
 }
 
-type ExposureUnbindCompletedPayload struct {
-	ExposureID string `json:"exposure_id"`
-	Error      string `json:"error,omitempty"`
-}
-
-// ===== Tunnel Events =====
-
-type TunnelBindRequestedPayload struct {
-	TunnelID         string `json:"tunnel_id"`
-	LeaseID          string `json:"lease_id"`
-	Hostname         string `json:"hostname"`
-	Target           string `json:"target"`      // port number or URL
-	TargetType       string `json:"target_type"` // "port" or "url"
-	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"`
-}
-
-type TunnelBindCompletedPayload struct {
-	TunnelID  string `json:"tunnel_id"`
-	LeaseID   string `json:"lease_id"`
-	Status    string `json:"status"` // "bound" or "error"
-	PublicURL string `json:"public_url,omitempty"`
+// LinkBindCompletedPayload is emitted by MMA after a link bind attempt.
+// Replaces ExposureBindCompletedPayload, TunnelBindCompletedPayload, and ChannelBindCompletedPayload.
+type LinkBindCompletedPayload struct {
+	LinkID    string `json:"link_id"`
+	Kind      string `json:"kind"`   // "exposure" | "tunnel" | "channel"
+	Status    string `json:"status"` // "success" or "failure"
 	Error     string `json:"error,omitempty"`
+	PublicURL string `json:"public_url,omitempty"` // for exposure and tunnel
+	LocalAddr string `json:"local_addr,omitempty"` // for channel initiator relay socket
+	Role      string `json:"role,omitempty"`       // for channel (needed by server_api status update)
 }
 
-type TunnelUnbindRequestedPayload struct {
-	TunnelID string `json:"tunnel_id"`
-	LeaseID  string `json:"lease_id"`
-}
-
-// ===== Channel Events (UNDF-111) =====
-
-// ChannelBindRequestedPayload is the Spine event payload forwarded to MMA
-// when server_api publishes a channel.bind.request event.
-type ChannelBindRequestedPayload struct {
-	ChannelID        string `json:"channel_id"`
-	OrgID            string `json:"org_id"`
-	Role             string `json:"role"`            // "listener" | "initiator"
-	Grant            string `json:"grant,omitempty"` // ES256 JWT; only for "initiator"
-	SourceServerID   string `json:"source_server_id"`
-	DestServerID     string `json:"dest_server_id"`
-	Purpose          string `json:"purpose,omitempty"`
-	HyphaeTunnelAddr string `json:"hyphae_tunnel_addr"`
-	ExpiresAt        int64  `json:"expires_at"`
-	CreatedAt        int64  `json:"created_at"`
-}
-
-// ChannelBindCompletedPayload is emitted by MMA after a channel bind attempt.
-type ChannelBindCompletedPayload struct {
-	ChannelID string `json:"channel_id"`
-	Role      string `json:"role"`
-	Status    string `json:"status"` // "active" or "error"
-	Error     string `json:"error,omitempty"`
+// LinkUnbindCompletedPayload is emitted by MMA after a link unbind attempt.
+type LinkUnbindCompletedPayload struct {
+	LinkID string `json:"link_id"`
+	Kind   string `json:"kind"`
+	Error  string `json:"error,omitempty"`
 }
 
 // ===== Event Type Constants =====
@@ -255,17 +236,11 @@ const (
 	EventCapabilityCacheDeltaUpdated    = "capability_cache.delta.updated"
 	EventMeshPolicyUpdated              = "mesh_policy.updated"
 	EventConsentStateUpdated            = "consent_state.updated"
-	EventExposureBindRequested          = "exposure.bind.requested"
-	EventExposureBindCompleted          = "exposure.bind.completed"
-	EventExposureUnbindRequested        = "exposure.unbind.requested"
-	EventExposureUnbindCompleted        = "exposure.unbind.completed"
-	EventTunnelBindRequested            = "tunnel.bind.requested"
-	EventTunnelBindCompleted            = "tunnel.bind.completed"
-	EventTunnelUnbindRequested          = "tunnel.unbind.requested"
-	EventTunnelUnbindCompleted          = "tunnel.unbind.completed"
+	EventLinkBindRequested              = "link.bind.requested"   // UA → MMA: request to bind a link (kind dispatched by MMA)
+	EventLinkUnbindRequested            = "link.unbind.requested" // UA → MMA: request to unbind a link
+	EventLinkBindCompleted              = "link.bind.completed"   // MMA → UA (via kernel): bind attempt result
+	EventLinkUnbindCompleted            = "link.unbind.completed" // MMA → UA (via kernel): unbind attempt result
 
-	EventChannelBindRequested = "channel.bind.requested" // server_api requests agent to bind a relay channel
-	EventChannelBindCompleted = "channel.bind.completed" // agent reports bind success/failure
 	EventChannelRouteRegister = "channel.route.register" // agent registers a local service addr for a channel purpose
 )
 
@@ -466,11 +441,11 @@ type Capability struct {
 }
 
 type CapabilityCache struct {
-	mu                sync.RWMutex           `json:\"-\"`
-	Version           string                 `json:\"version\"`
-	Capabilities      map[string]*Capability `json:\"capabilities\"`
-	SchemaIndexDigest string                 `json:\"schema_index_digest\"`
-	VerifiedAt        time.Time              `json:\"verified_at\"`
+	mu                sync.RWMutex           `json:"-"`
+	Version           string                 `json:"version"`
+	Capabilities      map[string]*Capability `json:"capabilities"`
+	SchemaIndexDigest string                 `json:"schema_index_digest"`
+	VerifiedAt        time.Time              `json:"verified_at"`
 }
 
 // GetCapability returns a capability by ID (thread-safe)

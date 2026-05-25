@@ -13,13 +13,11 @@ import (
 
 // RegisterHandlers registers channel event handlers with the event consumer.
 // emitter may be nil; completion events will still be logged but not emitted.
+// NOTE: channel.bind.requested is handled by the unified link package (UNDF-140).
+// This function registers only the route-register handler.
 func RegisterHandlers(ec *discovery.EventConsumer, provider Provider, emitter *kernel.KernelEmitter) error {
 	logger := logging.GetLogger(context.Background())
 	logger.Info("registering channel event handlers")
-
-	ec.RegisterHandler(types.EventChannelBindRequested, func(ctx context.Context, event *types.UAEvent) error {
-		return handleChannelBindRequested(ctx, provider, emitter, event)
-	})
 
 	// Register dynamic channel route handler if the provider supports it.
 	if hp, ok := provider.(*HyphaeProvider); ok {
@@ -29,68 +27,6 @@ func RegisterHandlers(ec *discovery.EventConsumer, provider Provider, emitter *k
 	}
 
 	logger.Info("channel event handlers registered")
-	return nil
-}
-
-// handleChannelBindRequested handles channel.bind.requested events.
-func handleChannelBindRequested(ctx context.Context, provider Provider, emitter *kernel.KernelEmitter, event *types.UAEvent) error {
-	logger := logging.GetLogger(ctx).With(
-		"event_type", event.EventType,
-		"event_id", event.EventID,
-	)
-
-	var payload types.ChannelBindRequestedPayload
-	if err := unmarshalPayload(event.Payload, &payload); err != nil {
-		logger.Error("failed to unmarshal channel bind requested payload", "error", err)
-		return err
-	}
-
-	logger = logger.With(
-		"channel_id", payload.ChannelID,
-		"role", payload.Role,
-		"org_id", payload.OrgID,
-	)
-	logger.Info("handling channel bind request")
-
-	req := &BindRequest{
-		ChannelID:        payload.ChannelID,
-		OrgID:            payload.OrgID,
-		Role:             payload.Role,
-		Grant:            payload.Grant,
-		HyphaeTunnelAddr: payload.HyphaeTunnelAddr,
-		SourceServerID:   payload.SourceServerID,
-		DestServerID:     payload.DestServerID,
-		Purpose:          payload.Purpose,
-	}
-
-	err := provider.BindChannel(ctx, req)
-
-	if emitter != nil {
-		completedPayload := map[string]interface{}{
-			"channel_id": payload.ChannelID,
-			"role":       payload.Role,
-			"status":     "success",
-			"error":      "",
-		}
-		if err != nil {
-			completedPayload["status"] = "failure"
-			completedPayload["error"] = err.Error()
-		}
-		// Include the initiator's local relay address so server_api can expose it.
-		if localAddr, ok := provider.LocalAddr(payload.ChannelID); ok {
-			completedPayload["local_addr"] = localAddr
-		}
-		if emitErr := emitter.EmitEvent(ctx, types.EventChannelBindCompleted, "channel", payload.ChannelID, completedPayload); emitErr != nil {
-			logger.Error("failed to emit channel bind completed event", "error", emitErr)
-		}
-	}
-
-	if err != nil {
-		logger.Error("channel bind failed", "error", err)
-		return err
-	}
-
-	logger.Info("channel bind successful", "role", payload.Role)
 	return nil
 }
 

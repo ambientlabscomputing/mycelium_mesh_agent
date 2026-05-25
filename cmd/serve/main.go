@@ -18,6 +18,7 @@ import (
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/discovery"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/exposure"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/kernel"
+	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/link"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/logging"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/policy_evaluator"
 	"github.com/ambientlabscomputing/mycelium_mesh_agent/internal/server"
@@ -214,20 +215,19 @@ func (l *Launcher) Start(ctx context.Context) error {
 			logger.Info("kernel emitter connected")
 		}
 
-		// Register exposure event handlers
-		if err := exposure.RegisterHandlers(l.eventConsumer, provider, kernelEmitter); err != nil {
-			logger.Error("failed to register exposure handlers", "error", err)
-			return err
-		}
-		logger.Info("exposure event handlers registered")
-
-		// Register channel event handlers (UNDF-111 peer-to-peer relay)
+		// Register unified link event handlers (UNDF-140: exposure + tunnel + channel)
 		channelProvider := channel.NewHyphaeProviderWithTLS(hyphaeConfig, tunneClientTLSCfg, logger)
-		if err := channel.RegisterHandlers(l.eventConsumer, channelProvider, kernelEmitter); err != nil {
-			logger.Error("failed to register channel handlers", "error", err)
+		if err := link.RegisterHandlers(l.eventConsumer, provider, channelProvider, kernelEmitter); err != nil {
+			logger.Error("failed to register link handlers", "error", err)
 			return err
 		}
-		logger.Info("channel event handlers registered")
+		logger.Info("link event handlers registered")
+
+		// Register channel route handler (route register is separate from bind)
+		if err := channel.RegisterHandlers(l.eventConsumer, channelProvider, kernelEmitter); err != nil {
+			logger.Error("failed to register channel route handler", "error", err)
+			return err
+		}
 	} else {
 		logger.Warn("Hyphae exposure provider disabled in configuration")
 	}
